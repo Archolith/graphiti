@@ -16,7 +16,7 @@ limitations under the License.
 
 from typing import Any, Protocol, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .models import Message, PromptFunction, PromptVersion
 from .prompt_helpers import to_prompt_json
@@ -63,6 +63,83 @@ class CombinedExtraction(BaseModel):
 
     extracted_entities: list[CombinedEntity] = Field(..., description='List of extracted entities')
     edges: list[CombinedFact] = Field(..., description='List of extracted relationship facts')
+
+    @model_validator(mode='before')
+    @classmethod
+    def sanitize_malformed_rows(cls, data: Any) -> Any:
+        """Sanitize malformed provider output rows natively before validation.
+
+        Non-dict top-level payloads are returned unchanged so normal Pydantic
+        validation handles them. Dict payloads are copied, never mutated.
+        Malformed entity rows are dropped; surviving rows keep only a stripped
+        canonical-or-alias name and an integer-coerced ``entity_type_id``.
+        Malformed edge rows are dropped; surviving rows keep their required
+        strings exactly and a filtered ``episode_indices`` list. Missing or
+        non-list arrays sanitize to ``[]`` here, while the outward JSON schema
+        still marks both arrays as required.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+
+        raw_entities = data.get('extracted_entities')
+        entities: list[dict[str, Any]] = []
+        if isinstance(raw_entities, list):
+            for entity in raw_entities:
+                if not isinstance(entity, dict):
+                    continue
+                name = None
+                canonical_name = entity.get('name')
+                if isinstance(canonical_name, str) and canonical_name.strip():
+                    name = canonical_name.strip()
+                else:
+                    entity_name_alias = entity.get('entity_name')
+                    if isinstance(entity_name_alias, str) and entity_name_alias.strip():
+                        name = entity_name_alias.strip()
+                    else:
+                        entity_alias = entity.get('entity')
+                        if isinstance(entity_alias, str) and entity_alias.strip():
+                            name = entity_alias.strip()
+                if name is None:
+                    continue
+                raw_type_id: Any = entity.get('entity_type_id')
+                try:
+                    entity_type_id = int(raw_type_id)
+                except (TypeError, ValueError):
+                    entity_type_id = -1
+                entities.append({'name': name, 'entity_type_id': entity_type_id})
+        data['extracted_entities'] = entities
+
+        raw_edges = data.get('edges')
+        edges: list[dict[str, Any]] = []
+        if isinstance(raw_edges, list):
+            for edge in raw_edges:
+                if not isinstance(edge, dict):
+                    continue
+                normalized: dict[str, Any] = {}
+                valid = True
+                for field in ('source_entity_name', 'target_entity_name', 'relation_type', 'fact'):
+                    value = edge.get(field)
+                    if not isinstance(value, str) or not value.strip():
+                        valid = False
+                        break
+                    normalized[field] = value
+                if not valid:
+                    continue
+                episode_indices = edge.get('episode_indices')
+                if isinstance(episode_indices, list):
+                    kept_indices = [
+                        index
+                        for index in episode_indices
+                        if isinstance(index, int) and not isinstance(index, bool)
+                    ]
+                    normalized['episode_indices'] = kept_indices if kept_indices else [0]
+                else:
+                    normalized['episode_indices'] = [0]
+                edges.append(normalized)
+        data['edges'] = edges
+
+        return data
 
 
 class Prompt(Protocol):

@@ -1,5 +1,36 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase C1e: native combined-extraction model sanitization (provider compatibility)
+
+- `graphiti_core/prompts/extract_nodes_and_edges.py`: `CombinedExtraction` gains a Pydantic
+  `mode="before"` validator that sanitizes malformed LLM provider rows natively. This is the
+  **generic half** of Menhir installer #2 (`_patch_graphiti_combined_extraction_models`) only —
+  labeled `provider compatibility`; the Menhir-specific half of installer #2 remains for Phase F.
+  Non-dict top-level payloads pass through unchanged (normal Pydantic validation); dict payloads
+  are copied, never mutated. Entity rows: non-dicts dropped; name resolution uses the valid
+  nonblank canonical `name` else first valid nonblank alias in `entity_name` then `entity`
+  (trimmed); unrecoverable rows dropped; `entity_type_id` coerced via `int()` with `-1` fallback
+  on `TypeError`/`ValueError` (int(True)==1 intentionally preserved); extras dropped. Edge rows:
+  non-dicts and rows with a missing/non-str/blank `source_entity_name`, `target_entity_name`,
+  `relation_type`, or `fact` dropped; retained strings preserved exactly; list `episode_indices`
+  filtered to non-bool ints with `[0]` fallback; non-list/missing defaults to `[0]`; extras
+  dropped. Row order preserved. `extracted_entities` and `edges` stay declared required with their
+  descriptions — the schema still marks both arrays required even though the validator supplies
+  `[]` for missing/non-list arrays.
+- `tests/test_combined_extraction_models.py`: NEW focused regression suite, 20 tests (required
+  schema + descriptions unchanged; missing/null/non-list arrays to `[]`; non-dict top-level still
+  fails via `ValidationError`; entity canonical/alias precedence, trimming, int coercion and `-1`
+  fallback incl. bool parity, malformed-row drops, extra-field drops; edge required-field drops,
+  exact string preservation, index filtering/default with a genuinely missing-key edge,
+  extra-field drops; input non-mutation; mixed valid/malformed row-order preservation; behavioral
+  no-endpoint-synthesis check for edges referencing unknown entities; pathlib source check that
+  the module contains no Menhir import/reference).
+- `.agent/data_models.md`: documents the `CombinedExtraction` sanitization contract.
+- Scope: only the generic half of installer #2. Follows C1a (installers #5/#7/#8), C1b (#9/#10),
+  C1c (#3), and C1d (#4). Menhir-side runtime patches are NOT removed yet (Phase F); other
+  installers remain un-migrated. Tests/lint/typecheck NOT RUN by the worker (orchestrator owns
+  verification).
+
 ## 2026-09-14 — Phase C: native structured summary prompts (migrates Menhir installer #4)
 
 - `graphiti_core/prompts/summarize_nodes.py`: `summarize_context` and `summarize_pair` now implement the Menhir

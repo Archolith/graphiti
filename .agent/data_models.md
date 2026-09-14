@@ -94,5 +94,21 @@ no runtime patching. This migrates two Menhir installer contracts into the fork 
   (bools included; integer-coercible values are cast to `int`). Valid entries and their order are unchanged;
   the existing `NodeDuplicate` model still validates retained canonical fields.
 
+- `CombinedExtraction` (`graphiti_core/prompts/extract_nodes_and_edges.py`, generic half of Menhir
+  installer #2, `_patch_graphiti_combined_extraction_models`): a before model-validator sanitizes
+  malformed provider rows. A non-dict top-level payload is returned unchanged (normal Pydantic
+  validation applies; dict payloads are copied, never mutated). Missing/non-list/null arrays become
+  `[]` in the validated model, while `extracted_entities` and `edges` stay declared required with
+  their descriptions, so `model_json_schema()` still marks both arrays required. Entity rows:
+  non-dicts dropped; name is the valid nonblank canonical `name`, else the first valid nonblank
+  alias in `entity_name` then `entity` (trimmed); rows with no recoverable name are dropped;
+  `entity_type_id` is `int()`-coerced, falling back to `-1` on `TypeError`/`ValueError` (bool
+  `True` intentionally coerces to `1`); only `name` and `entity_type_id` are retained. Edge rows:
+  non-dicts and rows whose `source_entity_name`, `target_entity_name`, `relation_type`, or `fact`
+  is not a nonblank string are dropped; retained strings are preserved exactly (not stripped);
+  a list `episode_indices` keeps only non-bool ints (defaulting to `[0]` when none survive);
+  non-list/missing `episode_indices` becomes `[0]`; only the five fields are retained. Row order
+  is preserved. The Menhir-specific half of installer #2 remains for Phase F.
+
 The Menhir-side runtime patches themselves are NOT removed yet (Phase F owns that); only the fork source now
 provides the same normalization natively.
