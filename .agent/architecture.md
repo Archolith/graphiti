@@ -55,8 +55,9 @@ patches remain installed until Phase F.
 Provider seams: graph database (`GraphDriver`), LLM (`LLMClient`), embedder (`EmbedderClient`), reranker
 (`CrossEncoderClient`). Consumers swap implementations at `Graphiti` construction. This maintenance branch started from
 the unmodified v0.29.3 source baseline; Menhir still installs runtime Graphiti patches against the fork, and migration
-phases are progressively moving that behavior into fork source (see Prompt JSON Serialization below and
-`.agent/CHANGELOG.md`). Full removal of runtime symbol rebinding is a later migration phase and is not yet met on this
+phases are progressively moving that behavior into fork source (see Prompt JSON Serialization below,
+Structured Summary Policy below, and `.agent/CHANGELOG.md`). Full removal of runtime symbol rebinding is a later
+migration phase and is not yet met on this
 branch.
 
 ## Prompt JSON Serialization
@@ -75,6 +76,24 @@ extraction. All prompt modules (and `search/search_helpers.py`) inherit this beh
 shared helper import — no runtime rebinding or patching of prompt modules is involved. This replaces
 Menhir runtime patch behavior (installer #3, `_patch_graphiti_prompt_json`) at the source level.
 
+## Structured Summary Policy
+
+`graphiti_core/prompts/summarize_nodes.py` implements the Menhir structured-summary policy natively in
+`summarize_context` and `summarize_pair` (installer #4, `_patch_graphiti_summarize`). Both produce exactly
+two messages (system + user) and request output as `key:value` pairs separated by `' | '` with a 150-character
+total ceiling, replacing the upstream prose-summary instruction style. `summarize_context` restricts the model
+to the provided MESSAGES, focuses on what the entity is, its role/status, and key attributes, and requires a
+GOOD/BAD example contrast; `summarize_pair` merges two summaries keeping the most current/specific values and
+dropping duplicates. Context values are interpolated with raw f-strings of `context.get(...)` defaults, so
+missing keys are tolerated without raising; `to_prompt_json` is deliberately not used in these two functions
+(`summary_description` still uses it). The `versions` mapping points directly at the native functions with no
+later rebinding, wrappers, or aliases.
+
+Deliberate Menhir policy divergence: `summarize_context` no longer asks the model to extract entity attributes
+and does not include `context['attributes']` in the prompt (upstream v0.29.3 instructs attribute extraction and
+renders an ATTRIBUTES block). This mirrors the active Menhir patch and narrows the function to summary-only
+output; it is an intentional tradeoff of this fork, not an omission.
+
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.
@@ -88,7 +107,8 @@ Menhir runtime patch behavior (installer #3, `_patch_graphiti_prompt_json`) at t
 ## Current Bootstrap State vs Future Migration
 
 Current: upstream `v0.29.3` tree with Phase C migrations landed in fork source (model None-hardening, response
-normalization, native prompt JSON serialization — see `.agent/CHANGELOG.md`); Menhir runtime patches remain installed
+normalization, native prompt JSON serialization, native structured summary prompts — see `.agent/CHANGELOG.md`);
+Menhir runtime patches remain installed
 until Phase F. Menhir remote structural ingest is deferred (known unavailable capability; do not invent
 `.agent/project-id`).
 Future: Menhir policy divergences and provider compatibility fixes migrate as labeled commits under the four allowed

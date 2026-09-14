@@ -1,5 +1,31 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase C: native structured summary prompts (migrates Menhir installer #4)
+
+- `graphiti_core/prompts/summarize_nodes.py`: `summarize_context` and `summarize_pair` now implement the Menhir
+  structured-summary policy natively (Menhir installer #4, `_patch_graphiti_summarize`), labeled a **Menhir policy
+  divergence**. Both return exactly two messages with exact structured-output system strings and request
+  `key:value` pairs separated by `' | '` with a 150-character total ceiling. `summarize_context` restricts the
+  model to the provided MESSAGES only, focuses on what the entity is, role/status, and key attributes, requires
+  omitting filler words, and includes a GOOD/BAD key:value-vs-prose example; `summarize_pair` merges two summaries
+  keeping the most current/specific values and dropping duplicates. Context values interpolate via raw f-string
+  `context.get(...)` defaults, so missing keys are tolerated without raising; `to_prompt_json` is not used in these
+  two functions. DELIBERATE DIVERGENCE DISCLOSED: `summarize_context` no longer instructs attribute extraction and
+  omits `context['attributes']` (upstream renders an ATTRIBUTES block), mirroring the active Menhir patch. The
+  `versions` mapping points directly at the native functions — no rebinding, wrappers, sentinels, aliases, config
+  surfaces, or hooks. `Summary`, `SummaryDescription`, `summary_description` (still using shared JSON
+  serialization), and the `MAX_SUMMARY_CHARS`-backed response descriptions are unchanged; the now-unused
+  `summary_instructions` import was removed.
+- `tests/test_structured_summary_prompts.py`: NEW focused regression tests (exact two-message role order and exact
+  system strings for both functions, format separator and 150-char ceiling and policy instructions, tagged-section
+  interpolation, missing/empty-key tolerance, no ATTRIBUTES block even when an attributes key is supplied, raw
+  pair-summary interpolation, direct `versions` identity mapping, `summary_description` JSON serialization).
+- `.agent/architecture.md`: documents the structured summary policy boundary, the 150-char key:value shape, the
+  direct native `versions` mapping, and the disclosed deliberate attributes-omission divergence.
+- Scope: only Menhir installer #4 (`_patch_graphiti_summarize`) is migrated. Follows C1a (installers #5/#7/#8),
+  C1b (installers #9/#10), and C1c (installer #3). The Menhir-side runtime patches are NOT removed yet (Phase F);
+  other installers remain un-migrated. Tests/lint/typecheck NOT RUN by the worker (orchestrator owns verification).
+
 ## 2026-09-14 — Phase C: native prompt JSON serialization (migrates Menhir installer #3)
 
 - `graphiti_core/prompts/prompt_helpers.py`: `to_prompt_json` now implements the prompt-serialization
