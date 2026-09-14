@@ -21,6 +21,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from graphiti_core.candidate_filter import (
+    CandidateFilterContext,
+    CandidateFilterDecision,
+    CandidateFilterHook,
+    evaluate_candidate_filter_decision,
+)
 from graphiti_core.edges import EntityEdge
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import semaphore_gather
@@ -421,6 +427,31 @@ async def _collect_candidate_nodes(
     return [_merge_candidate_nodes(result, existing_nodes_override) for result in search_results]
 
 
+async def _apply_candidate_filter(
+    candidate_filter_hook: CandidateFilterHook,
+    extracted_node: EntityNode,
+    candidates: list[EntityNode],
+) -> list[EntityNode]:
+    """Apply the caller's candidate-filter hook to one merged candidate list.
+
+    Runs exactly once per unique candidate (the input list is already
+    deduplicated by :func:`_merge_candidate_nodes`), preserves candidate
+    order, and removes candidates for which the hook returns ``EXCLUDE``.
+    The hook context is frozen but the node objects are borrowed (shared with
+    the in-flight call; read-only by contract).
+    """
+    filtered: list[EntityNode] = []
+    for candidate in candidates:
+        decision = evaluate_candidate_filter_decision(
+            await candidate_filter_hook.filter_candidate(
+                CandidateFilterContext(extracted_node=extracted_node, candidate_node=candidate)
+            )
+        )
+        if decision is CandidateFilterDecision.INCLUDE:
+            filtered.append(candidate)
+    return filtered
+
+
 async def _semantic_candidate_search(
     clients: GraphitiClients,
     extracted_nodes: list[EntityNode],
@@ -665,6 +696,7 @@ async def resolve_extracted_nodes(
     existing_nodes_override: list[EntityNode] | None = None,
     identity_gate_hook: IdentityGateHook | None = None,
     identity_gate_edges: list[EntityEdge] | None = None,
+    candidate_filter_hook: CandidateFilterHook | None = None,
 ) -> tuple[list[EntityNode], dict[str, str], list[tuple[EntityNode, EntityNode]]]:
     """Resolve nodes with semantic retrieval first, then deterministic and LLM dedup.
 
@@ -672,6 +704,16 @@ async def resolve_extracted_nodes(
     (see :mod:`graphiti_core.identity_gate`); ``identity_gate_edges`` carries the
     request-local extracted/precomputed edge evidence exposed to the hook as an
     ordinary argument. When the hook is absent, behavior is unchanged.
+
+    When ``candidate_filter_hook`` is provided, it is invoked exactly once per
+    unique merged candidate per extracted node — after semantic search results
+    and ``existing_nodes_override`` have been merged and deduplicated, before
+    deterministic exact/fuzzy handling or LLM candidate indexing (see
+    :mod:`graphiti_core.candidate_filter`). ``EXCLUDE`` removes the candidate
+    from that extracted node's pool; when all candidates are excluded, the
+    extracted node keeps Graphiti's ordinary no-candidate behavior (kept as a
+    new node) and neither the dedupe LLM nor the identity gate runs for it.
+    When the hook is absent, behavior is unchanged.
     """
     llm_client = clients.llm_client
     candidate_nodes_by_extracted = await _collect_candidate_nodes(
@@ -679,6 +721,11 @@ async def resolve_extracted_nodes(
         extracted_nodes,
         existing_nodes_override,
     )
+    if candidate_filter_hook is not None:
+        candidate_nodes_by_extracted = [
+            await _apply_candidate_filter(candidate_filter_hook, node, candidates)
+            for node, candidates in zip(extracted_nodes, candidate_nodes_by_extracted, strict=True)
+        ]
 
     state = DedupResolutionState(
         resolved_nodes=[None] * len(extracted_nodes),

@@ -190,6 +190,51 @@ identity heuristic (exact/substring/acronym/Jaccard), no edge-fact mention polic
 warning text, no receipt or telemetry semantics — Phase F will wire Menhir's positive-identity
 policy on top of this hook and remove installer #12.
 
+## Candidate Filter for Node-Dedupe Candidate Pools (native, fork)
+
+`node_operations.resolve_extracted_nodes` builds, per extracted node, a dedupe
+candidate pool by running semantic search (`_collect_candidate_nodes`) and merging
+those results with `existing_nodes_override` (`_merge_candidate_nodes`, order-preserving,
+uuid-deduplicated). The fork exposes a neutral typed hook at exactly that boundary: a
+`CandidateFilterHook` (see `graphiti_core/candidate_filter.py`) may be passed to
+`Graphiti(...)` at construction and is invoked exactly once per unique merged candidate
+per extracted node — after the merge/dedup above and before deterministic
+exact/fuzzy resolution or LLM candidate indexing (including the building of the
+LLM candidate list for unresolved nodes). It is consulted for every resolution
+path because all of them consume the merged pool.
+
+Hook contract: the hook receives a frozen `CandidateFilterContext` — borrowed
+request-local inputs (the current extracted `EntityNode` and the unique merged
+candidate `EntityNode`); the container is frozen but the node objects are shared with
+the in-flight call and are read-only by contract (no runtime copy or immutability
+enforcement) — and must return a `CandidateFilterDecision`: `INCLUDE` keeps the
+candidate in that extracted node's pool; `EXCLUDE` removes it, so it can never be
+resolved to (deterministically or via the LLM) for that node. The same candidate is
+evaluated once for each different extracted node. Candidate order is preserved. When
+all candidates for an extracted node are excluded, Graphiti's ordinary no-candidate
+behavior applies: the node is kept as new, and neither the dedupe LLM nor an installed
+identity-gate hook runs for it. Any other return value raises `TypeError`; hook
+exceptions (including cancellation) propagate and abort the call, leaving no state to
+reset — there is no module-global state, `ContextVar`, or cache, so there is no
+cross-call leakage.
+
+Compatibility rule: `resolve_extracted_nodes` gains an optional
+`candidate_filter_hook` parameter and `dedupe_nodes_bulk` a matching pass-through.
+The hook is forwarded from `Graphiti` at every `resolve_extracted_nodes` call path —
+single `add_episode`, `_extract_and_resolve_nodes`, `_extract_and_dedupe_nodes_bulk`/
+`dedupe_nodes_bulk`, `_resolve_nodes_and_edges_bulk`, and `add_triplet` — only when
+configured; with no hook configured, every call path keeps the exact legacy
+positional/keyword shape (the kwarg is omitted entirely, never passed as `None`).
+The candidate-filter and identity-gate hooks compose independently: each is
+forwarded exactly when its own hook is present, and identity edge evidence
+(`identity_gate_edges`) is forwarded only when the identity hook is present. The hook
+is policy-free: it carries no `structure_role`/`is_view`/`view_kind`/`view_class`
+predicate, no canonical-self/receipt/telemetry semantics, no logging counts, and no
+source policy — this replaces only the Graphiti-side *mechanism* of Menhir installer
+#14 (`_patch_graphiti_structural_candidate_isolation`, which wrapped
+`node_operations._collect_candidate_nodes`); Menhir's structural/View predicate
+remains outside the fork and is wired on top of this hook during Phase F.
+
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.

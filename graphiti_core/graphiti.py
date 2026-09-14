@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing_extensions import LiteralString
 
+from graphiti_core.candidate_filter import CandidateFilterHook
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.decorators import handle_multiple_group_ids
@@ -149,6 +150,7 @@ class Graphiti:
     # doubles, unpickled-style instances) safely observe "no hook configured" and
     # keep the legacy no-hook resolver signature; __init__ overrides per instance.
     identity_gate_hook: IdentityGateHook | None = None
+    candidate_filter_hook: CandidateFilterHook | None = None
 
     def __init__(
         self,
@@ -165,6 +167,7 @@ class Graphiti:
         trace_span_prefix: str = 'graphiti',
         single_episode_extraction_hook: SingleEpisodeExtractionHook | None = None,
         identity_gate_hook: IdentityGateHook | None = None,
+        candidate_filter_hook: CandidateFilterHook | None = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -213,6 +216,15 @@ class Graphiti:
             the merge. See :mod:`graphiti_core.identity_gate`. When absent,
             Graphiti performs its ordinary promotion behavior for LLM-proposed
             merges; deterministic resolution paths are unaffected either way.
+        candidate_filter_hook : CandidateFilterHook | None, optional
+            Optional extension hook invoked for each unique merged dedupe
+            candidate per extracted node, after search results and
+            ``existing_nodes_override`` have been merged and deduplicated and
+            before deterministic exact/fuzzy handling or LLM candidate
+            indexing, allowing the caller to include or exclude the candidate.
+            See :mod:`graphiti_core.candidate_filter`. When absent, Graphiti
+            uses its unfiltered candidate pool; excluded candidates can never
+            be resolved to for that extracted node.
 
         Returns
         -------
@@ -278,6 +290,9 @@ class Graphiti:
 
         # Optional identity-gate extension hook for LLM-proposed node merges (neutral; no policy)
         self.identity_gate_hook = identity_gate_hook
+
+        # Optional candidate-filter extension hook for dedupe candidate pools (neutral; no policy)
+        self.candidate_filter_hook = candidate_filter_hook
 
         # Capture telemetry event
         self._capture_initialization_telemetry()
@@ -728,11 +743,13 @@ class Graphiti:
             self.clients, episode, previous_episodes, entity_types, excluded_entity_types
         )
 
-        # Identity-gate kwargs are forwarded ONLY when a hook is configured, so the
-        # no-hook path keeps the legacy resolver signature exactly (compatibility).
+        # Hook kwargs are forwarded ONLY when the corresponding hook is configured,
+        # so the no-hook path keeps the legacy resolver signature exactly (compatibility).
         identity_kwargs: dict[str, Any] = {}
         if self.identity_gate_hook is not None:
             identity_kwargs['identity_gate_hook'] = self.identity_gate_hook
+        if self.candidate_filter_hook is not None:
+            identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
 
         nodes, uuid_map, duplicates = await resolve_extracted_nodes(
             self.clients,
@@ -935,12 +952,15 @@ class Graphiti:
             custom_extraction_instructions=custom_extraction_instructions,
         )
 
-        # Dedupe extracted nodes in memory. Identity-gate kwargs are forwarded only
-        # when a hook is configured, preserving the legacy dedupe signature otherwise.
+        # Dedupe extracted nodes in memory. Hook kwargs are forwarded only when
+        # the corresponding hook is configured, preserving the legacy dedupe
+        # signature otherwise.
         dedupe_kwargs: dict[str, Any] = {}
         if self.identity_gate_hook is not None:
             dedupe_kwargs['identity_gate_hook'] = self.identity_gate_hook
             dedupe_kwargs['extracted_edges'] = extracted_edges_bulk
+        if self.candidate_filter_hook is not None:
+            dedupe_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
         nodes_by_episode, uuid_map = await dedupe_nodes_bulk(
             self.clients, extracted_nodes_bulk, episode_context, entity_types, **dedupe_kwargs
         )
@@ -973,15 +993,16 @@ class Graphiti:
                     nodes_by_episode_unique[episode.uuid].append(node)
                     nodes_uuid_set.add(node.uuid)
 
-        # Resolve nodes. Identity-gate kwargs are forwarded only when a hook is
-        # configured, preserving the legacy resolver signature otherwise.
+        # Resolve nodes. Hook kwargs are forwarded only when the corresponding
+        # hook is configured, preserving the legacy resolver signature otherwise.
         def _identity_kwargs(edges: list[EntityEdge] | None) -> dict[str, Any]:
-            if self.identity_gate_hook is None:
-                return {}
-            return {
-                'identity_gate_hook': self.identity_gate_hook,
-                'identity_gate_edges': edges,
-            }
+            kwargs: dict[str, Any] = {}
+            if self.identity_gate_hook is not None:
+                kwargs['identity_gate_hook'] = self.identity_gate_hook
+                kwargs['identity_gate_edges'] = edges
+            if self.candidate_filter_hook is not None:
+                kwargs['candidate_filter_hook'] = self.candidate_filter_hook
+            return kwargs
 
         # Resolve nodes
         node_results = await semaphore_gather(
@@ -1290,12 +1311,15 @@ class Graphiti:
                     custom_extraction_instructions,
                 )
 
-                # Identity-gate kwargs are forwarded only when a hook is configured,
-                # so the no-hook path keeps the legacy resolver signature exactly.
+                # Hook kwargs are forwarded only when the corresponding hook is
+                # configured, so the no-hook path keeps the legacy resolver
+                # signature exactly.
                 identity_kwargs: dict[str, Any] = {}
                 if self.identity_gate_hook is not None:
                     identity_kwargs['identity_gate_hook'] = self.identity_gate_hook
                     identity_kwargs['identity_gate_edges'] = precomputed_edges
+                if self.candidate_filter_hook is not None:
+                    identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
                 nodes, uuid_map, _ = await resolve_extracted_nodes(
                     self.clients,
                     extracted_nodes,
@@ -1827,14 +1851,14 @@ class Graphiti:
         if edge.fact_embedding is None:
             await edge.generate_embedding(self.embedder)
 
-        # Identity-gate kwargs are forwarded only when a hook is configured, so the
-        # no-hook path keeps the legacy resolver signature exactly. add_triplet has
-        # no episode or edge evidence at this boundary.
-        identity_kwargs: dict[str, Any] = (
-            {'identity_gate_hook': self.identity_gate_hook}
-            if self.identity_gate_hook is not None
-            else {}
-        )
+        # Hook kwargs are forwarded only when the corresponding hook is configured,
+        # so the no-hook path keeps the legacy resolver signature exactly.
+        # add_triplet has no episode or edge evidence at this boundary.
+        identity_kwargs: dict[str, Any] = {}
+        if self.identity_gate_hook is not None:
+            identity_kwargs['identity_gate_hook'] = self.identity_gate_hook
+        if self.candidate_filter_hook is not None:
+            identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
         try:
             resolved_source = await EntityNode.get_by_uuid(self.driver, source_node.uuid)
         except NodeNotFoundError:

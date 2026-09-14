@@ -1,5 +1,69 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase D3: native neutral candidate-filter hook for dedupe candidate pools (fork mechanism half of installer #14)
+
+- `graphiti_core/candidate_filter.py`: NEW neutral typed extension hook module.
+  `CandidateFilterHook` is a runtime-checkable protocol invoked exactly once per unique
+  merged dedupe candidate per extracted node — after semantic search results and
+  `existing_nodes_override` have been merged and deduplicated (`_merge_candidate_nodes`)
+  and before deterministic exact/fuzzy handling or LLM candidate indexing. The hook
+  receives a frozen `CandidateFilterContext` (borrowed request-local extracted
+  `EntityNode` and unique merged candidate `EntityNode`; shared, not copied, and
+  read-only by contract) and must return `CandidateFilterDecision.INCLUDE` (keep the
+  candidate in the pool) or `CandidateFilterDecision.EXCLUDE` (remove it from that
+  extracted node's pool). Order is preserved; the same candidate is evaluated once per
+  different extracted node; when all candidates for an extracted node are excluded, the
+  ordinary no-candidate behavior applies (node kept as new) and neither the dedupe LLM
+  nor an installed identity-gate hook runs for it. Any other return value raises
+  `TypeError`; hook exceptions propagate with no state to reset. This is the
+  Graphiti-side *mechanism* replacement for Menhir installer #14
+  (`_patch_graphiti_structural_candidate_isolation`, which wrapped
+  `node_operations._collect_candidate_nodes` after merge/dedup); Menhir's
+  structural/View predicate (`structure_role`/`is_view`/`view_kind`/`view_class`,
+  logging counts) stays outside the fork and is wired on top during Phase F.
+- `graphiti_core/utils/maintenance/node_operations.py`: `resolve_extracted_nodes` gains
+  an optional `candidate_filter_hook` parameter; filtering runs in `_apply_candidate_filter`
+  immediately after `_collect_candidate_nodes`, once per unique candidate per extracted
+  node, before any resolution. Plain per-call argument; no module globals, no
+  `ContextVar`, no symbol rebinding.
+- `graphiti_core/graphiti.py`: `Graphiti.__init__` gains `candidate_filter_hook:
+  CandidateFilterHook | None = None` (class-level `candidate_filter_hook:
+  CandidateFilterHook | None = None` default overridden per instance by `__init__`, so
+  `__new__`-constructed subclasses/test doubles safely observe "no filter"). Wired at
+  every `resolve_extracted_nodes` call path with conditional forwarding — single
+  `add_episode`, `_extract_and_resolve_nodes`, `_extract_and_dedupe_nodes_bulk`,
+  `_resolve_nodes_and_edges_bulk`, and `add_triplet`; with no hook configured the kwarg
+  is omitted entirely (never passed as `None`) so every call path keeps the exact legacy
+  signature. Composition with D2 is independent: the candidate-filter kwarg and the
+  identity-gate kwargs are each forwarded exactly when their own hook is configured,
+  and `identity_gate_edges` is forwarded only when the identity hook is present.
+- `graphiti_core/utils/bulk_utils.py`: `dedupe_nodes_bulk` gains an optional
+  `candidate_filter_hook` pass-through to its first-pass `resolve_extracted_nodes`
+  calls; with no hook configured, no kwarg is forwarded.
+- `tests/test_candidate_filter.py`: NEW focused no-DB suite (31 test functions) covering
+  no-hook compatibility and exact legacy delegate shapes at add_episode, add_triplet,
+  bulk extract/dedupe, bulk resolve, and `dedupe_nodes_bulk` boundaries; filtering of
+  both search candidates and `existing_nodes_override`; merge/dedup occurring before the
+  hook runs (duplicate search+override candidate seen once); order preservation into the
+  LLM candidate index; exactly-once per unique candidate; INCLUDE/EXCLUDE semantics;
+  same candidate evaluated once per different extracted node; all-excluded no-candidate
+  behavior with no dedupe LLM and no identity-gate invocation; filter applied before
+  deterministic exact resolution (exact-name candidate excluded → node stays new,
+  LLM not called) and its INCLUDE twin resolving deterministically without the LLM;
+  strict invalid-return `TypeError`; hook exception propagation; no cross-call
+  leakage; protocol runtime-checkability; frozen-context reassignment rejection;
+  `Graphiti.__new__` class-level default; real constructor storage; D2 composition
+  (both hooks forwarded together; candidate filter alone → no identity kwargs); and a
+  structural AST check that the mechanism imports no `menhir` module. Verification: NOT
+  RUN by the worker (Codex owns tests, static checks, git, grading, and publication).
+- `.agent/architecture.md`: NEW "Candidate Filter for Node-Dedupe Candidate Pools"
+  section (filter boundary/order, borrowed-data semantics, no-hook compatibility rule,
+  D2 composition, policy exclusions, Phase F remainder).
+- Scope: Graphiti-side mechanism of installer #14 only. No Menhir predicate entered the
+  fork; installers #15 (untyped attribute preservation), #16 (adaptive dedupe), and #17
+  remain out of scope. Menhir's installer #14 structural/View predicate is removed from
+  the runtime side in Phase F.
+
 ## 2026-09-14 — Phase D2: native neutral identity-gate hook for LLM-proposed node merges (fork mechanism half of installer #12)
 
 - `graphiti_core/identity_gate.py`: NEW neutral typed extension hook module. `IdentityGateHook` is a

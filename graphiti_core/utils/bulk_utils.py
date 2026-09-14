@@ -23,6 +23,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 from typing_extensions import Any
 
+from graphiti_core.candidate_filter import CandidateFilterHook
 from graphiti_core.driver.driver import (
     GraphDriver,
     GraphDriverSession,
@@ -379,6 +380,7 @@ async def dedupe_nodes_bulk(
     entity_types: dict[str, type[BaseModel]] | None = None,
     identity_gate_hook: IdentityGateHook | None = None,
     extracted_edges: list[list[EntityEdge]] | None = None,
+    candidate_filter_hook: CandidateFilterHook | None = None,
 ) -> tuple[dict[str, list[EntityNode]], dict[str, str]]:
     """Resolve entity duplicates across an in-memory batch using a two-pass strategy.
 
@@ -390,20 +392,26 @@ async def dedupe_nodes_bulk(
 
     ``identity_gate_hook`` and ``extracted_edges`` (episode-indexed, aligned with
     ``extracted_nodes``) are passed through to the first pass so the hook sees the
-    episode's already-extracted edge evidence as ordinary per-call arguments. When no
-    hook is configured, neither kwarg is forwarded and the legacy resolver signature
+    episode's already-extracted edge evidence as ordinary per-call arguments.
+    ``candidate_filter_hook`` is likewise passed through to the first pass so each
+    episode's dedupe candidate pool is filtered before resolution. When no hook is
+    configured, none of these kwargs are forwarded and the legacy resolver signature
     is preserved exactly.
     """
 
     def _identity_kwargs(index: int) -> dict[str, Any]:
-        if identity_gate_hook is None:
-            return {}
-        edges = (
-            extracted_edges[index]
-            if extracted_edges is not None and index < len(extracted_edges)
-            else None
-        )
-        return {'identity_gate_hook': identity_gate_hook, 'identity_gate_edges': edges}
+        kwargs: dict[str, Any] = {}
+        if identity_gate_hook is not None:
+            edges = (
+                extracted_edges[index]
+                if extracted_edges is not None and index < len(extracted_edges)
+                else None
+            )
+            kwargs['identity_gate_hook'] = identity_gate_hook
+            kwargs['identity_gate_edges'] = edges
+        if candidate_filter_hook is not None:
+            kwargs['candidate_filter_hook'] = candidate_filter_hook
+        return kwargs
 
     first_pass_results = await semaphore_gather(
         *[
