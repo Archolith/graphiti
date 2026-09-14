@@ -1,5 +1,73 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase C1f: native entity-record tolerance + neutral group-id resolver hook (provider compatibility)
+
+- `graphiti_core/nodes.py`: `get_entity_node_from_record` now implements the **fork half** of Menhir installer #6
+  (`_patch_graphiti_entity_record_group_id`) natively — labeled `provider compatibility`; the Menhir namespace /
+  group-id policy itself is NOT in the fork and remains for Phase F. The outer record is defensively copied before
+  any mutation; dict `attributes` are copied before the upstream key-pops and non-None `labels` are copied to a
+  fresh list (including the `Entity_<group>` prefix strip), so caller-owned records, nested attributes, and label
+  containers are never mutated. KUZU JSON-string `attributes` handling and valid-record behavior are unchanged.
+  When the record's `group_id` is None, a neutral process-level resolver hook is consulted:
+  `set_entity_record_group_id_resolver(resolver | None)` registers (or resets) an
+  `EntityRecordGroupIdResolver = Callable[[Mapping[str, Any], GraphProvider], str | None]` as startup
+  configuration — not per-record monkeypatching. The resolver receives the defensive record copy plus the
+  provider; a `str` return
+  (including `''`) is authoritative, `None` falls back to `helpers.get_default_group_id(provider)` (FalkorDB `'_'`,
+  `''` elsewhere), non-string/non-None raises `TypeError`, and resolver exceptions propagate. Non-None stored
+  group ids bypass the hook unchanged. A `created_at` string ending exactly in `Z[UTC]` has only its terminal
+  suffix normalized to `+00:00` before `parse_db_date`; other values pass through unchanged. Null-group and
+  timestamp repairs log once per record key (uuid/name) via sets capped at 512 keys per category with arbitrary
+  eviction at capacity (`set.pop()`, matching current Menhir semantics; first-seen keys always log once per
+  retention window; retained repeats never re-log; evicted repeats re-log); logs carry identity and the chosen
+  group/original timestamp, never attributes.
+  `search/search_utils.py` imports this function object directly, so all search call sites gain the native
+  behavior with no symbol rebinding. The hook is entity-record-specific by name
+  (`EntityRecordGroupIdResolver` / `set_entity_record_group_id_resolver`) and the resolver's authority is
+  return-value-only: it receives a read-only mapping over an isolated shallow snapshot (nested attributes dict and
+  labels list copied again), so top-level mutation attempts raise on the mapping and nested mutation (if
+  attempted) affects neither caller input nor the returned node.
+- `tests/test_entity_record_tolerance.py`: NEW focused regression suite (21 tests) covering valid NEO4J records,
+  caller non-mutation (outer dict / attributes / labels list and tuple), provider defaults for null groups without
+  a resolver (NEO4J/FALKORDB), resolver contract (isolated read-only snapshot received, named-group inference,
+  null-group-only invocation, reset, `None` fallback, empty-string authority, `TypeError` on non-string, exception
+  propagation, non-callable rejection, return-only authority incl. nested-mutation isolation), exact `Z[UTC]`
+  repair vs other timestamp handling (plain terminal `Z` still parses via `fromisoformat` with no repair
+  diagnostic), diagnostics identity/dedupe/512 bound with eviction (600 unique keys → 600 first-seen logs at 512
+  storage; retained repeats silent, evicted repeats re-log), search_utils native behavior without rebinding, KUZU
+  string attributes, and a no-Menhir-reference source check. An autouse fixture resets the global resolver and
+  diagnostic sets between tests.
+- `.agent/data_models.md`: documents the Entity Record Tolerance contract (resolver hook lifecycle, copy
+  semantics, timestamp repair, bounded diagnostics). `.agent/architecture.md` intentionally not extended — it has
+  no extension/hooks section, so the contract stays in `data_models.md`.
+- Scope: fork half of installer #6 only; the Menhir-side runtime patch remains installed until Phase F, and
+  Menhir's namespace-to-group policy remains Phase F work. Tests/lint/typecheck NOT RUN by the worker
+  (orchestrator owns verification and git).
+- Review Corrections (Codex independent review, 2026-09-14): (1) P1 resolver authority leak — the resolver now
+  receives a read-only `MappingProxyType` over a separate shallow snapshot whose attributes dict and labels list
+  are copied again; return-only authority enforced, isolated from caller input and the returned node. (2) P1
+  bounded log-once — `_log_once` now evicts one existing key at the 512 capacity before adding and logging a new
+  key, matching the Menhir helper's eviction semantics; retained repeats stay silent, evicted repeats re-log.
+  (3) P2 timestamp test — plain terminal `Z` (accepted by `datetime.fromisoformat` on Python 3.12) now asserted to
+  parse successfully as an aware UTC datetime with no repair diagnostic instead of expecting `ValueError`.
+  (4) P2 API rename — `set_group_id_resolver`/`GroupIdResolver` renamed to
+  `set_entity_record_group_id_resolver`/`EntityRecordGroupIdResolver` everywhere so the hook is
+  entity-record-specific. (5) P2 Ruff import order — `import graphiti_core.search.search_utils as search_utils`
+  moved into the sorted local import block. (6) P3 count drift — test count corrected to the final static count of
+  21 test functions. (7) P2 resolver snapshot assertion — the test's snapshot-attributes expectation corrected to
+  `{'custom': 'value', 'sneaky': 'x'}` (Graphiti strips reserved keys from the working attributes copy before the
+  resolver is invoked); source unchanged. (8) P2 arbitrary set eviction — the bound test no longer assumes which
+  key `set.pop()` evicts; it derives a retained key from the actual set and an evicted key from the universe minus
+  the set, asserting no log for the retained repeat, exactly one log for the evicted repeat, and bounded size 512;
+  source unchanged. (9) P2 caplog isolation in the bound test — the repeat assertions now call `caplog.clear()`
+  before each repeat so they examine only new records rather than all 600 previously captured ones; source
+  unchanged. (10) P2 Ruff format line wrapping — the two long `_resolve(_valid_record(...))` calls in the bound
+  test were wrapped exactly as standard Ruff formatting renders them; source unchanged. Cumulative review tally:
+  10 corrected findings — 2x P1, 7x P2, 1x P3. Codex independent verification (post-format): focused pytest
+  `21 passed, 1 warning`; Ruff format `2 files already formatted`; Ruff check PASS; changed-file Pyright
+  0 errors/warnings/info; cumulative `483 passed, 11 skipped, 3 warnings`; repository-wide Ruff PASS; artifact
+  validation `7 records, 0 findings`; diff check exit 0 (informational line-ending warnings only).
+
 ## 2026-09-14 — Phase C1e: native combined-extraction model sanitization (provider compatibility)
 
 - `graphiti_core/prompts/extract_nodes_and_edges.py`: `CombinedExtraction` gains a Pydantic

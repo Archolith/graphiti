@@ -112,3 +112,34 @@ no runtime patching. This migrates two Menhir installer contracts into the fork 
 
 The Menhir-side runtime patches themselves are NOT removed yet (Phase F owns that); only the fork source now
 provides the same normalization natively.
+
+## Entity Record Tolerance Contract (native, fork, `provider compatibility`)
+
+`get_entity_node_from_record` (`graphiti_core/nodes.py`) now implements the fork half of Menhir installer #6
+(`_patch_graphiti_entity_record_group_id`) natively — this entry is labeled `provider compatibility`. The
+Menhir-side runtime patch remains installed until Phase F; the Menhir namespace/group-id policy itself is NOT in
+the fork and stays with Phase F.
+
+- Defensive copying: the outer record is shallow-copied before any mutation; dict `attributes` are copied before
+  the upstream key-pops, and non-None `labels` are copied to a fresh list (including the `Entity_<group>` prefix
+  strip), so caller-owned records, nested attributes, and label containers are never mutated. KUZU JSON-string
+  `attributes` behavior is unchanged.
+- Null group-id hook: when the record's `group_id` is None, `graphiti_core.nodes` consults the process-level
+  resolver registered via `set_entity_record_group_id_resolver(resolver | None)` (typed
+  `EntityRecordGroupIdResolver = Callable[[Mapping[str, Any], GraphProvider], str | None]`). Registration is startup
+  configuration, not per-record monkeypatching. The resolver receives a read-only mapping over an isolated shallow
+  snapshot of the record (the attributes dict and labels list are separately copied again), plus the provider; its
+  authority is return-value-only — top-level assignment fails on the read-only mapping and nested mutation (if
+  attempted) affects only the isolated snapshot, never caller input or the returned node. A `str` return
+  (including empty string) is authoritative, `None` falls
+  back to `helpers.get_default_group_id(provider)` (preserving FalkorDB's `'_'` and `''` elsewhere), a
+  non-string/non-None return raises `TypeError`, and resolver exceptions propagate. Non-None stored group ids
+  bypass the hook unchanged. No namespace interpretation, canonical-self behavior, or receipts live here.
+- Legacy timestamp repair: a `created_at` string ending exactly in `Z[UTC]` has only that terminal suffix
+  normalized to `+00:00` before `parse_db_date`; all other values pass through unchanged.
+- Bounded diagnostics: null group-id repairs and `Z[UTC]` repairs each log once per record key (uuid/name) using
+  sets capped at 512 keys per category; when a new key arrives at capacity, one existing key is evicted before the
+  new key is added and logged, so first-seen keys always log exactly once per retention window and retained repeat
+  keys never re-log; logs carry record identity and the chosen group/original timestamp, never attributes.
+- `search/search_utils.py` already imports this function object, so all search call sites get the native behavior
+  with no symbol rebinding.

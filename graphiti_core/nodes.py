@@ -17,9 +17,11 @@ limitations under the License.
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from enum import Enum
 from time import time
+from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
@@ -32,7 +34,7 @@ from graphiti_core.driver.driver import (
 )
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.errors import NodeNotFoundError
-from graphiti_core.helpers import parse_db_date, validate_node_labels
+from graphiti_core.helpers import get_default_group_id, parse_db_date, validate_node_labels
 from graphiti_core.models.nodes.node_db_queries import (
     COMMUNITY_NODE_RETURN,
     COMMUNITY_NODE_RETURN_NEPTUNE,
@@ -1040,6 +1042,83 @@ class SagaNode(Node):
 
 
 # Node helpers
+# Entity-record tolerance (fork)
+#
+# Process-level group-id resolver extension point for entity records.
+# Registration is startup configuration (not per-record monkeypatching): a
+# host application may set a resolver once at startup to decide the group id
+# for entity records whose stored group_id is null. The resolver receives a
+# read-only mapping over an isolated snapshot of the record (attributes dict
+# and labels list separately copied again) plus the graph provider; it must
+# return a str (authoritative, including empty string) or None to fall back
+# to the provider default. Its authority is return-value-only: top-level
+# mutation attempts fail on the read-only mapping, and nested mutation (if
+# attempted) affects only the isolated snapshot. No namespace policy lives
+# here.
+EntityRecordGroupIdResolver = Callable[[Mapping[str, Any], GraphProvider], str | None]
+
+_entity_record_group_id_resolver: EntityRecordGroupIdResolver | None = None
+
+_DIAGNOSTIC_BOUND = 512
+_logged_null_group_keys: set[str] = set()
+_logged_repaired_timestamp_keys: set[str] = set()
+
+
+def set_entity_record_group_id_resolver(resolver: EntityRecordGroupIdResolver | None) -> None:
+    """Register (or reset) the process-level entity-record group-id resolver.
+
+    Accepts a resolver callable or None to reset. This is startup
+    configuration; calling it per-record is not supported usage.
+    """
+    global _entity_record_group_id_resolver
+    if resolver is not None and not callable(resolver):
+        raise TypeError(f'group-id resolver must be callable or None, got {type(resolver)!r}')
+    _entity_record_group_id_resolver = resolver
+
+
+def _record_log_key(record: Mapping[str, Any]) -> str:
+    key = record.get('uuid') or record.get('name')
+    return str(key) if key is not None else '<unknown>'
+
+
+def _log_once(seen: set[str], key: str, message: str) -> None:
+    if key in seen:
+        return
+    if len(seen) >= _DIAGNOSTIC_BOUND:
+        seen.pop()
+    seen.add(key)
+    logger.warning(message)
+
+
+def _resolver_snapshot(record: dict[str, Any]) -> Mapping[str, Any]:
+    # The resolver's authority is return-value-only: hand it a read-only
+    # mapping over its own shallow snapshot, with the nested mutable
+    # containers copied again so even nested mutation stays isolated.
+    snapshot = dict(record)
+    if isinstance(snapshot.get('attributes'), dict):
+        snapshot['attributes'] = dict(snapshot['attributes'])
+    if snapshot.get('labels') is not None:
+        snapshot['labels'] = list(snapshot['labels'])
+    return MappingProxyType(snapshot)
+
+
+_LEGACY_UTC_SUFFIX = 'Z[UTC]'
+
+
+def _repair_created_at(record: dict[str, Any], log_key: str) -> Any:
+    created_at = record.get('created_at')
+    if isinstance(created_at, str) and created_at.endswith(_LEGACY_UTC_SUFFIX):
+        original = created_at
+        created_at = created_at[: -len(_LEGACY_UTC_SUFFIX)] + '+00:00'
+        record['created_at'] = created_at
+        _log_once(
+            _logged_repaired_timestamp_keys,
+            log_key,
+            f'entity record {log_key}: repaired legacy timestamp {original!r} to {created_at!r}',
+        )
+    return created_at
+
+
 def get_episodic_node_from_record(record: Any) -> EpisodicNode:
     created_at = parse_db_date(record['created_at'])
     valid_at = parse_db_date(record['valid_at'])
@@ -1063,10 +1142,14 @@ def get_episodic_node_from_record(record: Any) -> EpisodicNode:
 
 
 def get_entity_node_from_record(record: Any, provider: GraphProvider) -> EntityNode:
+    # Defensive copy: never mutate the caller-owned record, its nested
+    # attributes, or its labels.
+    record = dict(record)
+
     if provider == GraphProvider.KUZU:
         attributes = json.loads(record['attributes']) if record['attributes'] else {}
     else:
-        attributes = record['attributes']
+        attributes = dict(record['attributes'])
         attributes.pop('uuid', None)
         attributes.pop('name', None)
         attributes.pop('group_id', None)
@@ -1075,8 +1158,33 @@ def get_entity_node_from_record(record: Any, provider: GraphProvider) -> EntityN
         attributes.pop('created_at', None)
         attributes.pop('labels', None)
 
-    labels = record.get('labels', [])
+    labels = record.get('labels')
+    labels = list(labels) if labels is not None else []
+    record['attributes'] = attributes
+    record['labels'] = labels
+
+    log_key = _record_log_key(record)
+
     group_id = record.get('group_id')
+    if group_id is None:
+        if _entity_record_group_id_resolver is not None:
+            resolved = _entity_record_group_id_resolver(_resolver_snapshot(record), provider)
+            if resolved is not None and not isinstance(resolved, str):
+                raise TypeError(
+                    f'group-id resolver must return str or None, got {type(resolved)!r}'
+                )
+            group_id = resolved
+        if group_id is None:
+            group_id = get_default_group_id(provider)
+        record['group_id'] = group_id
+        _log_once(
+            _logged_null_group_keys,
+            log_key,
+            f'entity record {log_key}: null group_id repaired to {group_id!r}',
+        )
+
+    created_at = _repair_created_at(record, log_key)
+
     if 'Entity_' + group_id.replace('-', '') in labels:
         labels.remove('Entity_' + group_id.replace('-', ''))
 
@@ -1086,7 +1194,7 @@ def get_entity_node_from_record(record: Any, provider: GraphProvider) -> EntityN
         name_embedding=record.get('name_embedding'),
         group_id=group_id,
         labels=labels,
-        created_at=parse_db_date(record['created_at']),  # type: ignore
+        created_at=parse_db_date(created_at),  # type: ignore
         summary=record['summary'],
         attributes=attributes,
     )
