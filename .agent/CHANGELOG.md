@@ -1,5 +1,30 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase C: native prompt JSON serialization (migrates Menhir installer #3)
+
+- `graphiti_core/prompts/prompt_helpers.py`: `to_prompt_json` now implements the prompt-serialization
+  boundary natively (Menhir installer #3, `_patch_graphiti_prompt_json`). Before `json.dumps`, the payload
+  is recursively copied/normalized: dict entries whose string key ends with `_embedding` are dropped, as
+  are entries whose value is a list/tuple of length strictly greater than 64 whose first eight items are
+  int/float (bool excluded) — the intentional sampled-head compatibility rule (length 64 is preserved).
+  Non-JSON-native values convert via callable `isoformat`, then `iso_format`, then `to_native` (each called
+  without arguments), recursing into non-primitive conversion results, with `str` fallback when a
+  conversion returns the same object or no conversion applies; exceptions from malformed conversion methods
+  propagate. Input is never mutated; `ensure_ascii`/`indent` pass through unchanged. No monkeypatching or
+  symbol rebinding — all prompt modules and `search/search_helpers.py` inherit the behavior through the
+  existing shared-helper import.
+- `tests/test_prompt_json.py`: NEW focused regression tests (baseline JSON, ensure_ascii default/True,
+  indent, `_embedding` key removal for non-vector values, structural removal at 65 vs preservation at 64,
+  sampled-head boundary, bool/string long-list preservation, nested dict/list/tuple recursion, input
+  non-mutation, isoformat/iso_format/to_native fallbacks including recursive conversion,
+  self-returning conversion → str, plain unsupported object → str).
+- `.agent/architecture.md`: documents the native prompt-serialization boundary and the exact
+  >64/first-eight rule; bootstrap-state wording updated to reflect Phase C migrations in progress.
+- Scope: only Menhir installer #3 (`_patch_graphiti_prompt_json`) is migrated. Follows C1a (installers
+  #5/#7/#8) and C1b (installers #9/#10). The Menhir-side runtime patches are NOT removed yet (Phase F);
+  other installers remain un-migrated. Tests/lint/typecheck NOT RUN by the worker (orchestrator owns
+  verification).
+
 ## 2026-09-14 — Phase C: native response normalization for prompts (migrates Menhir installers #9/#10)
 
 - `graphiti_core/prompts/extract_nodes.py`: `ExtractedEntity` gains a `_normalize_provider_fields` before

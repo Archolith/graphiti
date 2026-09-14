@@ -8,7 +8,8 @@ then supports hybrid retrieval (semantic + keyword + graph traversal) without fu
 
 **Fork context:** this tree is the Archolith soft fork of upstream `getzep/graphiti`, baseline tag `v0.29.3`, exact
 commit `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`, branch `menhir/0.29.3`. `origin` is `Archolith/graphiti`; `upstream`
-is `getzep/graphiti`. No semantic customization has migrated yet — current state is pure upstream bootstrap.
+is `getzep/graphiti`. Semantic customization migration has begun (see `.agent/CHANGELOG.md`); Menhir's runtime
+patches remain installed until Phase F.
 
 ## Tech Stack
 
@@ -52,10 +53,27 @@ is `getzep/graphiti`. No semantic customization has migrated yet — current sta
 | `utils/` | Maintenance, dedup, community, and mass operations |
 
 Provider seams: graph database (`GraphDriver`), LLM (`LLMClient`), embedder (`EmbedderClient`), reranker
-(`CrossEncoderClient`). Consumers swap implementations at `Graphiti` construction. This maintenance branch currently
-contains the **unmodified v0.29.3 source baseline**; current Menhir still installs **17 runtime Graphiti patches**
-against that baseline. A goal of later migration phases is to move suitable behavior into fork source or explicit hooks
-and remove runtime symbol rebinding — that goal is not yet met on this branch.
+(`CrossEncoderClient`). Consumers swap implementations at `Graphiti` construction. This maintenance branch started from
+the unmodified v0.29.3 source baseline; Menhir still installs runtime Graphiti patches against the fork, and migration
+phases are progressively moving that behavior into fork source (see Prompt JSON Serialization below and
+`.agent/CHANGELOG.md`). Full removal of runtime symbol rebinding is a later migration phase and is not yet met on this
+branch.
+
+## Prompt JSON Serialization
+
+`graphiti_core/prompts/prompt_helpers.py::to_prompt_json` implements a native prompt-serialization
+boundary: before `json.dumps`, the payload is recursively copied and normalized so that (1) dict
+entries whose string key ends with `_embedding` are dropped, (2) dict entries whose value structurally
+looks like an embedding vector are dropped — a list/tuple of length strictly greater than 64 whose
+FIRST EIGHT items are int/float (bool excluded); this intentional sampled-head rule preserves short
+numeric lists, bool lists, and string lists — and (3) non-JSON-native values (temporal-like provider
+objects) are converted via callable `isoformat`, then `iso_format`, then `to_native`, with a final
+`str` fallback; a conversion returning the same object short-circuits to `str`. The caller's input is
+never mutated, and `ensure_ascii`/`indent` pass through to `json.dumps` unchanged. This prevents
+embedding vectors from bloating prompts and prevents temporal serialization failures during episode
+extraction. All prompt modules (and `search/search_helpers.py`) inherit this behavior through the
+shared helper import — no runtime rebinding or patching of prompt modules is involved. This replaces
+Menhir runtime patch behavior (installer #3, `_patch_graphiti_prompt_json`) at the source level.
 
 ## Fork / Upstream Topology
 
@@ -69,8 +87,10 @@ and remove runtime symbol rebinding — that goal is not yet met on this branch.
 
 ## Current Bootstrap State vs Future Migration
 
-Current: pure upstream `v0.29.3` tree plus documentation scaffold; no semantic customization migrated; Menhir remote
-structural ingest is deferred (known unavailable capability; do not invent `.agent/project-id`).
+Current: upstream `v0.29.3` tree with Phase C migrations landed in fork source (model None-hardening, response
+normalization, native prompt JSON serialization — see `.agent/CHANGELOG.md`); Menhir runtime patches remain installed
+until Phase F. Menhir remote structural ingest is deferred (known unavailable capability; do not invent
+`.agent/project-id`).
 Future: Menhir policy divergences and provider compatibility fixes migrate as labeled commits under the four allowed
 labels (`upstream bug fix` | `Menhir policy divergence` | `provider compatibility` | `temporary workaround`).
 
