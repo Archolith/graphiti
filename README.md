@@ -39,6 +39,33 @@ Graphiti
 > Check out the new [MCP server for Graphiti](mcp_server/README.md)! Give Claude, Cursor, and other MCP clients powerful
 > context graph-based memory with temporal awareness.
 
+## Archolith soft-fork maintenance
+
+This repository is the **Archolith soft fork** of [getzep/graphiti](https://github.com/getzep/graphiti), maintained for
+Menhir. All Graphiti content below is upstream documentation and remains accurate for this fork.
+
+- **Purpose:** a maintenance line that tracks upstream Graphiti while carrying Menhir-specific policy divergences.
+- **Baseline:** upstream `getzep/graphiti` tag `v0.29.3` at exact commit `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`.
+- **Branch:** this isolated maintenance worktree carries the `menhir/0.29.3` branch.
+- **Remotes:** `origin` is `Archolith/graphiti` (the public fork); `upstream` is `getzep/graphiti`.
+- **Consumer pinning:** Menhir consumes this fork by **exact commit SHA** — never a moving branch or tag.
+- **Migration status:** no semantic customization has migrated yet; this is the bootstrap state only.
+
+### Maintenance procedure
+
+1. Fetch upstream (`git fetch upstream`).
+2. Assess incoming changes; apply them by deliberate cherry-pick or rebase **in a separate worktree**.
+3. Run equivalence, regression, and packaging gates before accepting anything.
+4. Update Menhir's pinned exact SHA only after gates pass.
+5. Never blindly merge upstream `main` into the maintenance line.
+
+Every fork customization commit must be labeled with exactly one of:
+
+- `upstream bug fix`
+- `Menhir policy divergence`
+- `provider compatibility`
+- `temporary workaround`
+
 Graphiti is a framework for building and querying temporal context graphs for AI agents. Unlike static knowledge graphs,
 Graphiti's context graphs track how facts change over time, maintain provenance to source data, and support both
 prescribed and learned ontology — making them purpose-built for agents operating on evolving, real-world data.
