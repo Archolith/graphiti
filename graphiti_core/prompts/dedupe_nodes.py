@@ -16,7 +16,7 @@ limitations under the License.
 
 from typing import Any, Protocol, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .models import Message, PromptFunction, PromptVersion
 from .prompt_helpers import to_prompt_json
@@ -34,8 +34,49 @@ class NodeDuplicate(BaseModel):
     )
 
 
+def _coerce_int(value: Any) -> int | None:
+    """Coerce an integer-coercible value to int; bools and failures return None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class NodeResolutions(BaseModel):
-    entity_resolutions: list[NodeDuplicate] = Field(..., description='List of resolved nodes')
+    entity_resolutions: list[NodeDuplicate] = Field(
+        default_factory=list, description='List of resolved nodes'
+    )
+
+    @model_validator(mode='before')
+    @classmethod
+    def _normalize_entity_resolutions(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        raw = d.get('entity_resolutions')
+        if raw is None or not isinstance(raw, list):
+            d['entity_resolutions'] = []
+            return d
+        normalized: list[dict[str, Any]] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            item = dict(entry)
+            coerced_id = _coerce_int(item.get('id'))
+            if coerced_id is None:
+                continue
+            item['id'] = coerced_id
+            if item.get('name') is None:
+                item['name'] = ''
+            coerced_dup = _coerce_int(item.get('duplicate_candidate_id'))
+            item['duplicate_candidate_id'] = -1 if coerced_dup is None else coerced_dup
+            normalized.append(item)
+        d['entity_resolutions'] = normalized
+        return d
 
 
 class Prompt(Protocol):

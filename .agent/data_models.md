@@ -68,3 +68,31 @@ patching. This migrates three Menhir installer contracts into the fork source:
   `EntityNode`/`CommunityNode.generate_name_embedding` harden `name is None` to `''` before calling the embedder, so
   newline replacement cannot crash; observable behavior matches the legacy wrapper (field ends as `''`, embedder
   receives the empty string).
+
+## Response Normalization Contract (native, fork)
+
+These response models tolerate malformed LLM provider output natively via Pydantic before model-validators —
+no runtime patching. This migrates two Menhir installer contracts into the fork source:
+
+- `ExtractedEntity` (`graphiti_core/prompts/extract_nodes.py`, Menhir installer #9): a before model-validator
+  normalizes degenerate provider payloads. Alias recovery runs only when the canonical `name` key is absent
+  (a present-but-invalid canonical `name` proceeds to normal Pydantic validation). It accepts `entity_name`
+  or a string `entity` as the name, plus key-typo tolerance (trim/lower and trailing `-`/`_`/space, e.g.
+  `name-`, `Name `); accepts the degenerate single-pair `{<entity name>: <integer type id>}` shape; and
+  resolves a missing `entity_type_id` in the reviewed installer precedence: `type_id`; integer `type`;
+  present `type_name` discards the value and defaults to 0 (winning over coexisting `entity_type`/`entity`);
+  integer `entity_type` else 0; remaining `entity` integer-coercible else 0; final default 0.
+  Missing/unrecoverable `name` still raises `ValidationError`. `episode_indices` deliberately keeps the
+  upstream v0.29.3 default `[0]` — this is a correction of the stale Menhir replacement model, whose
+  `default_factory=list` (`[]`) was copied with a comment incorrectly claiming it mirrored upstream
+  (accidental patch drift, now fixed).
+- `NodeResolutions` (`graphiti_core/prompts/dedupe_nodes.py`, Menhir installer #10): a before model-validator
+  normalizes `entity_resolutions` (fresh-list default; missing/null yields `[]`; a malformed non-sequence
+  top-level value fails safely to `[]` instead of raising). Non-dict entries and entries without an
+  integer-coercible `id` are dropped (bools are never accepted as integer ids); retained entries get
+  `name=''` when missing/null and `duplicate_candidate_id=-1` when missing/null/non-integer-coercible
+  (bools included; integer-coercible values are cast to `int`). Valid entries and their order are unchanged;
+  the existing `NodeDuplicate` model still validates retained canonical fields.
+
+The Menhir-side runtime patches themselves are NOT removed yet (Phase F owns that); only the fork source now
+provides the same normalization natively.

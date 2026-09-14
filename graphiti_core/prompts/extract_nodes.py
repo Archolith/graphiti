@@ -16,13 +16,19 @@ limitations under the License.
 
 from typing import Any, Protocol, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from graphiti_core.utils.text_utils import MAX_SUMMARY_CHARS
 
 from .models import Message, PromptFunction, PromptVersion
 from .prompt_helpers import to_prompt_json
 from .snippets import summary_instructions
+
+
+def _normalized_key(key: Any) -> Any:
+    if not isinstance(key, str):
+        return key
+    return key.strip().lower().rstrip('-_ ')
 
 
 class ExtractedEntity(BaseModel):
@@ -36,6 +42,58 @@ class ExtractedEntity(BaseModel):
         description='List of episode numbers (0-indexed) this entity was extracted from. '
         'When processing a single episode, this should be [0].',
     )
+
+    @model_validator(mode='before')
+    @classmethod
+    def _normalize_provider_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+
+        # Degenerate single-pair mapping: {<entity name>: <integer type id>}
+        if len(d) == 1:
+            key, value = next(iter(d.items()))
+            if (
+                key not in ('name', 'entity_type_id')
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+            ):
+                return {'name': key, 'entity_type_id': value}
+
+        if 'name' not in d:
+            name = None
+            if 'entity_name' in d:
+                name = d['entity_name']
+            elif isinstance(d.get('entity'), str):
+                name = d['entity']
+            else:
+                for key, value in d.items():
+                    if isinstance(value, str) and _normalized_key(key) == 'name':
+                        name = value
+                        break
+            if name is not None:
+                d['name'] = name
+
+        if 'entity_type_id' not in d:
+            type_id = None
+            if 'type_id' in d:
+                type_id = d['type_id']
+            elif isinstance(d.get('type'), int) and not isinstance(d['type'], bool):
+                type_id = d['type']
+            elif 'type_name' in d:
+                type_id = 0
+            elif 'entity_type' in d:
+                type_id = d['entity_type'] if (
+                    isinstance(d['entity_type'], int) and not isinstance(d['entity_type'], bool)
+                ) else 0
+            elif isinstance(d.get('name'), str) and 'entity' in d:
+                try:
+                    type_id = int(d['entity'])
+                except (TypeError, ValueError):
+                    type_id = 0
+            d['entity_type_id'] = 0 if type_id is None else type_id
+
+        return d
 
 
 class ExtractedEntities(BaseModel):

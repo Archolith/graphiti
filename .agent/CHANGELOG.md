@@ -1,5 +1,29 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase C: native response normalization for prompts (migrates Menhir installers #9/#10)
+
+- `graphiti_core/prompts/extract_nodes.py`: `ExtractedEntity` gains a `_normalize_provider_fields` before
+  model-validator (Menhir installer #9) — alias recovery only when the canonical `name` key is absent
+  (`entity_name`, string `entity`, key typos like `name-`/`name_`/`Name `), degenerate
+  `{<entity name>: <int type id>}` payloads, and `entity_type_id` fallbacks in installer precedence
+  (`type_id`; integer `type`; present `type_name` → 0, winning over `entity_type`/`entity`; integer
+  `entity_type` else 0; remaining `entity` coerced to int else 0; default 0). Missing name still raises.
+  `episode_indices` deliberately KEEPS the upstream v0.29.3 default `[0]`, correcting the stale Menhir
+  replacement-model default `[]` whose comment wrongly claimed it mirrored upstream.
+- `graphiti_core/prompts/dedupe_nodes.py`: `NodeResolutions` gains an `_normalize_entity_resolutions` before
+  model-validator (Menhir installer #10) — fresh-list default; missing/null/non-sequence top-level values
+  fail safe to `[]`; non-dict and non-integer-id entries dropped (bools never accepted as ids); `name`
+  null→`''`; `duplicate_candidate_id` null/non-integer (bools included)→`-1`, integer-coercible→`int`.
+- `tests/test_response_model_normalization.py`: NEW focused regression tests for both validators (canonical
+  passthrough, all aliases/typos, singleton mapping, type defaults, missing-name failure, upstream
+  `episode_indices=[0]` correction, mixed/degenerate rows, fail-safe empties, no shared mutable defaults).
+- `.agent/data_models.md`: documents the native response-normalization contract and the deliberate
+  `episode_indices=[0]` correction versus the stale Menhir patch.
+- Scope: only Menhir installers #9 (`_patch_graphiti_entity_extraction`) and #10
+  (`_patch_graphiti_dedupe_resolutions`) are migrated. The Menhir-side runtime patches are NOT removed yet;
+  other installers remain un-migrated. Tests/lint/typecheck NOT RUN by the worker (orchestrator owns
+  verification).
+
 ## 2026-09-14 — Phase C: native None-hardening for models (migrates Menhir installers #5/#7/#8)
 
 - `graphiti_core/nodes.py`: `EntityNode` gains a `coerce_none_summary` before-validator (explicit `summary=None`
