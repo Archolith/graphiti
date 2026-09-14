@@ -32,6 +32,7 @@ from graphiti_core.edges import Edge, EntityEdge, EpisodicEdge, create_entity_ed
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import normalize_l2, semaphore_gather
+from graphiti_core.identity_gate import IdentityGateHook
 from graphiti_core.models.edges.edge_db_queries import (
     get_entity_edge_save_bulk_query,
     get_episodic_edge_save_bulk_query,
@@ -376,6 +377,8 @@ async def dedupe_nodes_bulk(
     extracted_nodes: list[list[EntityNode]],
     episode_tuples: list[tuple[EpisodicNode, list[EpisodicNode]]],
     entity_types: dict[str, type[BaseModel]] | None = None,
+    identity_gate_hook: IdentityGateHook | None = None,
+    extracted_edges: list[list[EntityEdge]] | None = None,
 ) -> tuple[dict[str, list[EntityNode]], dict[str, str]]:
     """Resolve entity duplicates across an in-memory batch using a two-pass strategy.
 
@@ -384,7 +387,23 @@ async def dedupe_nodes_bulk(
     2. Re-run the deterministic similarity heuristics across the union of resolved nodes to catch
        duplicates that only co-occur inside this batch, emitting a canonical UUID map that callers
        can apply to edges and persistence.
+
+    ``identity_gate_hook`` and ``extracted_edges`` (episode-indexed, aligned with
+    ``extracted_nodes``) are passed through to the first pass so the hook sees the
+    episode's already-extracted edge evidence as ordinary per-call arguments. When no
+    hook is configured, neither kwarg is forwarded and the legacy resolver signature
+    is preserved exactly.
     """
+
+    def _identity_kwargs(index: int) -> dict[str, Any]:
+        if identity_gate_hook is None:
+            return {}
+        edges = (
+            extracted_edges[index]
+            if extracted_edges is not None and index < len(extracted_edges)
+            else None
+        )
+        return {'identity_gate_hook': identity_gate_hook, 'identity_gate_edges': edges}
 
     first_pass_results = await semaphore_gather(
         *[
@@ -394,6 +413,7 @@ async def dedupe_nodes_bulk(
                 episode_tuples[i][0],
                 episode_tuples[i][1],
                 entity_types,
+                **_identity_kwargs(i),
             )
             for i, nodes in enumerate(extracted_nodes)
         ]

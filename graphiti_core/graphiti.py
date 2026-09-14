@@ -17,6 +17,7 @@ limitations under the License.
 import logging
 from datetime import datetime
 from time import time
+from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -53,6 +54,7 @@ from graphiti_core.helpers import (
     validate_excluded_entity_types,
     validate_group_id,
 )
+from graphiti_core.identity_gate import IdentityGateHook
 from graphiti_core.llm_client import LLMClient, OpenAIClient
 from graphiti_core.namespaces import EdgeNamespace, NodeNamespace
 from graphiti_core.nodes import (
@@ -143,6 +145,11 @@ class AddTripletResults(BaseModel):
 
 
 class Graphiti:
+    # Class-level default so instances that bypass __init__ (subclasses, test
+    # doubles, unpickled-style instances) safely observe "no hook configured" and
+    # keep the legacy no-hook resolver signature; __init__ overrides per instance.
+    identity_gate_hook: IdentityGateHook | None = None
+
     def __init__(
         self,
         uri: str | None = None,
@@ -157,6 +164,7 @@ class Graphiti:
         tracer: Tracer | None = None,
         trace_span_prefix: str = 'graphiti',
         single_episode_extraction_hook: SingleEpisodeExtractionHook | None = None,
+        identity_gate_hook: IdentityGateHook | None = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -199,6 +207,12 @@ class Graphiti:
             :mod:`graphiti_core.extraction_routing`. When absent, Graphiti uses
             its default routing: combined extraction for ordinary schemas and
             the separate path when custom edge schemas are supplied.
+        identity_gate_hook : IdentityGateHook | None, optional
+            Optional extension hook invoked for each valid LLM-proposed node
+            merge during deduplication, allowing the caller to allow or veto
+            the merge. See :mod:`graphiti_core.identity_gate`. When absent,
+            Graphiti performs its ordinary promotion behavior for LLM-proposed
+            merges; deterministic resolution paths are unaffected either way.
 
         Returns
         -------
@@ -261,6 +275,9 @@ class Graphiti:
 
         # Optional single-episode extraction extension hook (neutral; no policy)
         self.single_episode_extraction_hook = single_episode_extraction_hook
+
+        # Optional identity-gate extension hook for LLM-proposed node merges (neutral; no policy)
+        self.identity_gate_hook = identity_gate_hook
 
         # Capture telemetry event
         self._capture_initialization_telemetry()
@@ -711,12 +728,19 @@ class Graphiti:
             self.clients, episode, previous_episodes, entity_types, excluded_entity_types
         )
 
+        # Identity-gate kwargs are forwarded ONLY when a hook is configured, so the
+        # no-hook path keeps the legacy resolver signature exactly (compatibility).
+        identity_kwargs: dict[str, Any] = {}
+        if self.identity_gate_hook is not None:
+            identity_kwargs['identity_gate_hook'] = self.identity_gate_hook
+
         nodes, uuid_map, duplicates = await resolve_extracted_nodes(
             self.clients,
             extracted_nodes,
             primary_episode,
             previous_episodes,
             entity_types,
+            **identity_kwargs,
         )
 
         return nodes, uuid_map, duplicates, node_episode_index_map
@@ -911,9 +935,14 @@ class Graphiti:
             custom_extraction_instructions=custom_extraction_instructions,
         )
 
-        # Dedupe extracted nodes in memory
+        # Dedupe extracted nodes in memory. Identity-gate kwargs are forwarded only
+        # when a hook is configured, preserving the legacy dedupe signature otherwise.
+        dedupe_kwargs: dict[str, Any] = {}
+        if self.identity_gate_hook is not None:
+            dedupe_kwargs['identity_gate_hook'] = self.identity_gate_hook
+            dedupe_kwargs['extracted_edges'] = extracted_edges_bulk
         nodes_by_episode, uuid_map = await dedupe_nodes_bulk(
-            self.clients, extracted_nodes_bulk, episode_context, entity_types
+            self.clients, extracted_nodes_bulk, episode_context, entity_types, **dedupe_kwargs
         )
 
         return nodes_by_episode, uuid_map, extracted_edges_bulk
@@ -944,6 +973,16 @@ class Graphiti:
                     nodes_by_episode_unique[episode.uuid].append(node)
                     nodes_uuid_set.add(node.uuid)
 
+        # Resolve nodes. Identity-gate kwargs are forwarded only when a hook is
+        # configured, preserving the legacy resolver signature otherwise.
+        def _identity_kwargs(edges: list[EntityEdge] | None) -> dict[str, Any]:
+            if self.identity_gate_hook is None:
+                return {}
+            return {
+                'identity_gate_hook': self.identity_gate_hook,
+                'identity_gate_edges': edges,
+            }
+
         # Resolve nodes
         node_results = await semaphore_gather(
             *[
@@ -953,6 +992,7 @@ class Graphiti:
                     episode,
                     previous_episodes,
                     entity_types,
+                    **_identity_kwargs(edges_by_episode.get(episode.uuid)),
                 )
                 for episode, previous_episodes in episode_context
             ]
@@ -1250,12 +1290,19 @@ class Graphiti:
                     custom_extraction_instructions,
                 )
 
+                # Identity-gate kwargs are forwarded only when a hook is configured,
+                # so the no-hook path keeps the legacy resolver signature exactly.
+                identity_kwargs: dict[str, Any] = {}
+                if self.identity_gate_hook is not None:
+                    identity_kwargs['identity_gate_hook'] = self.identity_gate_hook
+                    identity_kwargs['identity_gate_edges'] = precomputed_edges
                 nodes, uuid_map, _ = await resolve_extracted_nodes(
                     self.clients,
                     extracted_nodes,
                     episode,
                     previous_episodes,
                     entity_types,
+                    **identity_kwargs,
                 )
 
                 # Resolve edges, carrying edges already produced by the combined
@@ -1780,12 +1827,21 @@ class Graphiti:
         if edge.fact_embedding is None:
             await edge.generate_embedding(self.embedder)
 
+        # Identity-gate kwargs are forwarded only when a hook is configured, so the
+        # no-hook path keeps the legacy resolver signature exactly. add_triplet has
+        # no episode or edge evidence at this boundary.
+        identity_kwargs: dict[str, Any] = (
+            {'identity_gate_hook': self.identity_gate_hook}
+            if self.identity_gate_hook is not None
+            else {}
+        )
         try:
             resolved_source = await EntityNode.get_by_uuid(self.driver, source_node.uuid)
         except NodeNotFoundError:
             resolved_source_nodes, _, _ = await resolve_extracted_nodes(
                 self.clients,
                 [source_node],
+                **identity_kwargs,
             )
             resolved_source = resolved_source_nodes[0]
 
@@ -1795,6 +1851,7 @@ class Graphiti:
             resolved_target_nodes, _, _ = await resolve_extracted_nodes(
                 self.clients,
                 [target_node],
+                **identity_kwargs,
             )
             resolved_target = resolved_target_nodes[0]
 

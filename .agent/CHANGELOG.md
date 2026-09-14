@@ -1,5 +1,89 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase D2: native neutral identity-gate hook for LLM-proposed node merges (fork mechanism half of installer #12)
+
+- `graphiti_core/identity_gate.py`: NEW neutral typed extension hook module. `IdentityGateHook` is a
+  runtime-checkable protocol invoked exactly once per valid LLM-proposed node merge during dedup —
+  after normalized `NodeResolutions` are available and before `_promote_resolved_node` or any
+  resolved-state/uuid-map/duplicate-pair mutation; never for negative (`-1`) decisions, invalid
+  candidate ids, invalid/duplicate relative ids, deterministic exact/similarity resolution, or paths
+  with no LLM-proposed merge. The hook receives a frozen `IdentityGateContext` — borrowed
+  request-local evidence (extracted node, candidate node, `candidate_id`, episode when available,
+  previous episodes, request-local extracted/precomputed `EntityEdge` evidence) that is shared, not
+  copied, and must not be mutated — and must return `IdentityGateDecision.ALLOW` (ordinary
+  promotion) or `IdentityGateDecision.VETO` (ordinary no-duplicate behavior). Any other return value
+  raises `TypeError`; hook exceptions propagate with no state to reset. This is the Graphiti-side
+  *mechanism* replacement for Menhir installer #12 (`_patch_graphiti_dedup_identity_gate`, which
+  wrapped `_resolve_with_llm` and temporarily replaced `llm_client.generate_response`); Menhir
+  policy stays outside the fork until Phase F.
+- `graphiti_core/utils/maintenance/node_operations.py`: `resolve_extracted_nodes` and
+  `_resolve_with_llm` gain optional `identity_gate_hook` and `identity_gate_edges` parameters (plain
+  per-call arguments; no module globals, no `ContextVar`, no `generate_response` wrapping). The hook
+  is consulted only on the valid proposed-merge branch.
+- `graphiti_core/graphiti.py`:   `Graphiti.__init__` gains `identity_gate_hook: IdentityGateHook | None
+  = None` (a class-level `identity_gate_hook: IdentityGateHook | None = None` default is overridden
+  per instance by `__init__`, so subclasses/test doubles/unpickled-style instances that bypass
+  `__init__` safely observe "no hook" and keep the legacy no-hook signature; default absent keeps
+  prior behavior exactly).
+  Wired at every `resolve_extracted_nodes` call site with conditional forwarding: when a hook is
+  configured, single `add_episode` passes the combined/hook `precomputed_edges` as edge evidence
+  (`None` on the separate route, where edges legitimately do not exist yet at node resolution),
+  bulk `_resolve_nodes_and_edges_bulk` passes each episode's deduped `edges_by_episode`,
+  `add_triplet` passes the hook with no episode and no edge evidence, and the unused
+  `_extract_and_resolve_nodes` helper (no in-repo callers) passes the hook with no edge evidence;
+  when no hook is configured, none of the identity-gate kwargs are forwarded and every call path
+  keeps the exact legacy resolver/dedupe signature (so existing wrappers and test doubles are
+  unaffected).
+- `graphiti_core/utils/bulk_utils.py`: `dedupe_nodes_bulk` gains optional `identity_gate_hook` and
+  episode-indexed `extracted_edges` pass-throughs so the hook sees each episode's already-extracted
+  edge evidence as ordinary arguments; with no hook configured, neither kwarg is forwarded.
+- `tests/test_identity_gate.py`: NEW focused no-DB suite (27 test functions / 27 collected outcomes)
+  covering absent-hook
+  compatibility (promotion preserved), allow and veto on valid merges, exactly-once invocation per
+  merge, no invocation for `-1`/invalid candidate id/out-of-range or duplicate relative ids/
+  deterministic exact and fuzzy paths/no-candidate paths, full context evidence (node identity,
+  candidate id, episode, previous episodes, edges) and no cross-call leakage, strict invalid-return
+  `TypeError`, hook exception propagation, protocol runtime-checkability, frozen-context
+  reassignment rejection, Graphiti constructor storage, DB-free public wiring tests for single
+  `add_episode` (hook + precomputed edges),   `add_triplet` (hook, no episode/edges), bulk
+  (`_extract_and_dedupe_nodes_bulk` hook + episode edges, `dedupe_nodes_bulk` pass-through with both
+  populated evidence, and no-hook legacy-signature delegation tests proving both new kwargs are
+  entirely absent on the default path at the add_episode, add_triplet, bulk-dedupe, and
+  dedupe_nodes_bulk boundaries), a regression test proving `Graphiti.__new__(Graphiti)` observes no
+  hook (full-flow compatibility for such instances through public `add_episode` is supplied by the
+  pre-existing `tests/test_extraction_routing.py::test_add_episode_combined_route_wiring_end_to_end`),
+  and a structural AST check that the mechanism
+  imports
+  no `menhir` module.
+- `.agent/architecture.md`: NEW "Identity Gate for LLM-Proposed Node Merges" section (invocation
+  lifecycle, decision semantics, borrowed-data/mutation rules, per-flow edge-evidence availability,
+  default compatibility, Phase F remainder).
+- Scope: Graphiti-side mechanism of installer #12 only. No Menhir policy (identity heuristics, edge-
+  fact mention policy, warning text, receipts, telemetry) entered the fork; installer #12's Menhir
+  side is removed in Phase F. Verification: NOT RUN by the worker (Codex owns tests, static checks,
+  git, grading, and publication). Codex round-1 review: focused pytest `4 failed, 19 passed,
+  1 warning` (23 collected), Ruff check 4 errors (3 import-order, 1 unused variable), Ruff format
+  2 files reformattable, Pyright 2 errors; all corrected by the worker (tests use the real
+  `Graphiti` constructor with spec'd doubles and the flattened candidate index, imports reordered,
+  frozen-context test uses dynamic `setattr`, exact counts recorded). Codex round-2 review: focused
+  pytest `1 failed, 22 passed, 1 warning`, Ruff check 1 B010 error, Ruff format 2 files
+  reformattable, Pyright 1 error; all corrected (stub signature, `cast(Any, ...)` frozen pattern,
+  formatter shapes, pre-configured tracer Mock). Codex round-3 cumulative review: cumulative
+  no-external-DB suite `3 failed, 530 passed, 11 skipped, 3 warnings` — pre-existing tests failed
+  because the no-hook path still forwarded identity-gate kwargs, violating absent-hook
+  compatibility; fixed by conditional kwargs forwarding (kwargs omitted entirely when no hook is
+  configured) at every Graphiti/bulk call path, with new legacy-signature delegation tests.
+  Repository-wide Ruff PASS at round 3. Round 4: 3 focused test-fixture failures (independent edge
+  objects) fixed in tests; focused Ruff/format/Pyright PASS. Round 5: 2 focused test failures
+  (nested-list identity level) fixed in tests; Ruff/format/Pyright PASS. Round 6: cumulative suite
+  `1 failed, 535 passed, 11 skipped, 3 warnings` — `Graphiti.__new__`-style doubles hit an
+  AttributeError reading `identity_gate_hook`; fixed with a class-level typed default overridden by
+  `__init__`, plus a direct regression test. Round 7–8: two focused failures were setup gaps in the
+  new synthetic full-flow regression (missing unrelated `__init__` fields); per review, the
+  synthetic test was deleted in round 9 as redundant — the class-level invariant is proven directly
+  and full-flow `__new__`-instance compatibility is already covered by the pre-existing
+  `test_add_episode_combined_route_wiring_end_to_end`. Codex re-run pending.
+
 ## 2026-09-14 — Phase D1: native anti-conflation counterexample in per-entity dedup prompts (fork half of installer #11)
 
 - `graphiti_core/prompts/dedupe_nodes.py`: both active per-entity dedup prompts (`node` and `nodes`,

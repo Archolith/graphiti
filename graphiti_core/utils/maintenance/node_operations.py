@@ -24,6 +24,12 @@ from pydantic import BaseModel
 from graphiti_core.edges import EntityEdge
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import semaphore_gather
+from graphiti_core.identity_gate import (
+    IdentityGateContext,
+    IdentityGateDecision,
+    IdentityGateHook,
+    evaluate_identity_decision,
+)
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.config import ModelSize
 from graphiti_core.nodes import (
@@ -472,11 +478,18 @@ async def _resolve_with_llm(
     episode: EpisodicNode | None,
     previous_episodes: list[EpisodicNode] | None,
     entity_types: dict[str, type[BaseModel]] | None,
+    identity_gate_hook: IdentityGateHook | None = None,
+    identity_gate_edges: list[EntityEdge] | None = None,
 ) -> None:
     """Escalate unresolved nodes to the dedupe prompt so the LLM can select or reject duplicates.
 
     The guardrails below defensively ignore malformed or duplicate LLM responses so the
     ingestion workflow remains deterministic even when the model misbehaves.
+
+    When ``identity_gate_hook`` is provided, it is invoked exactly once for each valid
+    LLM-proposed merge, after normalized resolutions are available and before the
+    candidate is promoted or any resolved-state mutation happens. See
+    :mod:`graphiti_core.identity_gate`.
     """
     if not state.unresolved_indices:
         return
@@ -607,9 +620,28 @@ async def _resolve_with_llm(
         if duplicate_candidate_id < 0:
             resolved_node = extracted_node
         elif duplicate_candidate_id in candidates_by_id:
-            resolved_node = _promote_resolved_node(
-                extracted_node, candidates_by_id[duplicate_candidate_id]
-            )
+            candidate_node = candidates_by_id[duplicate_candidate_id]
+            if identity_gate_hook is not None:
+                decision = evaluate_identity_decision(
+                    await identity_gate_hook.evaluate_identity_gate(
+                        IdentityGateContext(
+                            extracted_node=extracted_node,
+                            candidate_node=candidate_node,
+                            candidate_id=duplicate_candidate_id,
+                            episode=episode,
+                            previous_episodes=(
+                                previous_episodes if previous_episodes is not None else []
+                            ),
+                            edges=(identity_gate_edges if identity_gate_edges is not None else []),
+                        )
+                    )
+                )
+                if decision is not IdentityGateDecision.ALLOW:
+                    resolved_node = extracted_node
+                else:
+                    resolved_node = _promote_resolved_node(extracted_node, candidate_node)
+            else:
+                resolved_node = _promote_resolved_node(extracted_node, candidate_node)
         else:
             logger.warning(
                 'Invalid duplicate_candidate_id %d for extracted node %s; treating as no duplicate.',
@@ -631,8 +663,16 @@ async def resolve_extracted_nodes(
     previous_episodes: list[EpisodicNode] | None = None,
     entity_types: dict[str, type[BaseModel]] | None = None,
     existing_nodes_override: list[EntityNode] | None = None,
+    identity_gate_hook: IdentityGateHook | None = None,
+    identity_gate_edges: list[EntityEdge] | None = None,
 ) -> tuple[list[EntityNode], dict[str, str], list[tuple[EntityNode, EntityNode]]]:
-    """Resolve nodes with semantic retrieval first, then deterministic and LLM dedup."""
+    """Resolve nodes with semantic retrieval first, then deterministic and LLM dedup.
+
+    When ``identity_gate_hook`` is provided, it gates each valid LLM-proposed merge
+    (see :mod:`graphiti_core.identity_gate`); ``identity_gate_edges`` carries the
+    request-local extracted/precomputed edge evidence exposed to the hook as an
+    ordinary argument. When the hook is absent, behavior is unchanged.
+    """
     llm_client = clients.llm_client
     candidate_nodes_by_extracted = await _collect_candidate_nodes(
         clients,
@@ -686,6 +726,8 @@ async def resolve_extracted_nodes(
             episode,
             previous_episodes,
             entity_types,
+            identity_gate_hook=identity_gate_hook,
+            identity_gate_edges=identity_gate_edges,
         )
 
     if not state.unresolved_indices and not any(candidate_nodes_by_extracted):

@@ -147,6 +147,49 @@ default routing above (combined by default — itself a divergence from upstream
 policy-free: it carries no Menhir receipt, marker, repair, or telemetry semantics — Phase F will wire Menhir
 policy on top of this hook and remove installers #1/#2.
 
+## Identity Gate for LLM-Proposed Node Merges (native, fork)
+
+`node_operations._resolve_with_llm` is the seam where the dedupe LLM selects (or rejects) an existing
+candidate for each extracted node. The fork exposes a neutral typed hook at exactly that boundary:
+an `IdentityGateHook` (see `graphiti_core/identity_gate.py`) may be passed to `Graphiti(...)` at
+construction and is invoked exactly once per *valid* LLM-proposed merge — after normalized
+`NodeResolutions` are available and before `_promote_resolved_node` or any resolved-state,
+uuid-map, or duplicate-pair mutation. It is never invoked for negative (`duplicate_candidate_id < 0`)
+decisions, invalid candidate ids, invalid or duplicate relative ids, deterministic exact/similarity
+resolution, or paths with no LLM-proposed merge. This replaces only the Graphiti-side *mechanism* of
+Menhir installer #12 (`_patch_graphiti_dedup_identity_gate`, which wrapped
+`node_operations._resolve_with_llm` and temporarily replaced `llm_client.generate_response`); the
+Menhir policy remains outside the fork and is wired during Phase F.
+
+Hook contract: the hook receives a frozen `IdentityGateContext` — borrowed request-local evidence
+(the extracted `EntityNode`, the selected candidate `EntityNode`, the LLM's `candidate_id`, the
+episode when resolution is episode-bound, the prior episodes, and the request-local
+extracted/precomputed `EntityEdge` evidence available at that boundary); the container is frozen but
+its contents are shared with the call and hooks must not mutate them — and must return an
+`IdentityGateDecision`: `ALLOW` preserves Graphiti's ordinary promotion of the candidate; `VETO`
+gives the extracted node Graphiti's ordinary no-duplicate behavior (kept as a new node). Any other
+return value raises `TypeError`; hook exceptions (including cancellation) propagate and abort the
+call, leaving no state to reset.
+
+Edge evidence travels through ordinary per-call arguments — `identity_gate_edges` on
+`resolve_extracted_nodes` / `_resolve_with_llm`, and an episode-indexed `extracted_edges` list on
+`dedupe_nodes_bulk` — never a module global, `ContextVar`, or cache. Availability by flow: single
+`add_episode` passes the combined/hook `precomputed_edges` (`None` on the separate route, where
+edges do not exist yet at node-resolution time); the bulk path passes each episode's already
+extracted edges at both `dedupe_nodes_bulk` and `_resolve_nodes_and_edges_bulk` (the latter's
+deduped `edges_by_episode`); `add_triplet` passes the hook with no episode and no edges.
+The hook parameter defaults to absent; with no hook installed, resolution behavior is byte-for-byte
+the pre-D2 fork behavior (direct promotion of valid merges). Compatibility rule: identity-gate
+kwargs are forwarded from `Graphiti`/bulk call paths only when a hook is configured — with no hook,
+every call path (`add_episode`, `_extract_and_resolve_nodes`, `_extract_and_dedupe_nodes_bulk`,
+`_resolve_nodes_and_edges_bulk`, `add_triplet`, `dedupe_nodes_bulk`'s first pass) invokes
+`resolve_extracted_nodes`/`dedupe_nodes_bulk` with the exact legacy positional/keyword shape,
+omitting both new kwargs entirely; edge evidence alone never triggers keyword forwarding. The hook is
+policy-free: it carries no
+identity heuristic (exact/substring/acronym/Jaccard), no edge-fact mention policy, no Menhir
+warning text, no receipt or telemetry semantics — Phase F will wire Menhir's positive-identity
+policy on top of this hook and remove installer #12.
+
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.
