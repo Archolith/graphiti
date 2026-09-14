@@ -6,7 +6,7 @@
 - Plan/ticket: Phase C (durable plan; Menhir Graphiti soft-fork migration), harness task
   `TASK-graphiti-softfork-phase-c1a-none-hardening-glm53-20260914`
 - Worktree/branch: `C:\Users\thron\IdeaProjects\.agent\worktrees\graphiti-menhir-0293`, branch `menhir/0.29.3`
-- Commits: UNCOMMITTED
+- Commits: `f850cd76a01b308035b371298406fe8c17655e30` (label: `Fork-Label: provider compatibility`)
 
 ## Summary
 
@@ -72,8 +72,12 @@ Design checks performed by inspection only:
 - Production implementation (`graphiti_core/nodes.py`, `graphiti_core/edges.py`) and docs were NOT altered in the
   first correction pass; only the test file and this wrapup changed.
 - P3 (EOF whitespace, final review pass): `git diff --check` reported an extra blank line at EOF in
-  `.agent/data_models.md`; removed by the worker. The final `git diff --check` rerun remains for Codex to perform
-  after this fix — the worker has NOT claimed it passes.
+  `.agent/data_models.md`; removed by the worker and confirmed clean in the final Codex verification pass.
+- P2 follow-up (final stub capture-type mismatch, corrected after the first review pass): Pyright flagged
+  `_StubEmbedder.received: list[list[str]]` because the abstract `create` input union cannot be appended to it. The
+  capture type is now the honest `list[object]` (each appended value is still checked to be `list[str]` at runtime
+  before appending); value assertions and test count (13) are unchanged. No blanket ignores; no production changes.
+  Pyright rerun NOT performed by the worker — confirmed clean by Codex.
 
 ## Independent Verification Results (Codex-run; NOT run by worker)
 
@@ -90,19 +94,20 @@ The following were executed by Codex during independent C1a verification; the wo
   build on Windows/Python 3.14. Codex installed only the declared test/provider clients needed to run the no-DB
   suite. This is an environment limitation, not a product failure.
 
-## Claim Cross-Check
-- P2 follow-up (final stub capture-type mismatch, corrected after the first review pass): Pyright flagged
-  `_StubEmbedder.received: list[list[str]]` because the abstract `create` input union cannot be appended to it. The
-  capture type is now the honest `list[object]` (each appended value is still checked to be `list[str]` at runtime
-  before appending); value assertions and test count (13) are unchanged. No blanket ignores; no production changes.
-  Pyright rerun NOT performed by the worker — Codex will rerun.
+## Independent Acceptance
+
+C1a was independently accepted by Codex with no open findings. All of the following passed as already recorded above
+(see Verification and Independent Verification Results): final `git diff --check`, the 13 focused tests, Ruff,
+Pyright (0 errors / 0 warnings), and the no-database unit gate (379 passed, 11 skipped), plus wrapup artifact
+validation (2 checked, 0 findings). The only remaining action is this wrapup metadata adjustment itself, which is
+left for a separate orchestrator closeout commit.
 
 ## Claim Cross-Check
 
 - Summary matches actual diff: yes
 - Files-changed list matches actual diff: yes (six named files only; confirmed via `git status`/`git diff` inspection)
-- Commit list accurate: yes (`UNCOMMITTED` is accurate — no git actions performed)
-- Verification entries honest: yes (all marked NOT RUN)
+- Commit list accurate: yes (`f850cd76a01b308035b371298406fe8c17655e30`, `Fork-Label: provider compatibility`)
+- Verification entries honest: yes (worker runs marked NOT RUN; Codex-run results recorded separately)
 - No overclaim of Phase C/Menhir completion: yes (only installers #5/#7/#8 claimed migrated)
 
 ## Completion Checklist
@@ -115,7 +120,7 @@ The following were executed by Codex during independent C1a verification; the wo
 - [x] Docs updated (`data_models.md`, `CHANGELOG.md`) naming exactly #5/#7/#8 as migrated
 - [x] Diff scope confirmed: only the six named files
 - [x] Harness task file deleted
-- [x] No Menhir edits, no git actions, no test/lint runs
+- [x] No Menhir edits, no worker git actions, no worker test/lint runs (orchestrator committed C1a)
 
 ## Assumptions
 
@@ -128,14 +133,14 @@ The following were executed by Codex during independent C1a verification; the wo
 
 ## Risks / Gaps
 
-- Tests/lint/typecheck not executed by the worker; a validator typo or Pydantic version subtlety would only surface
-  at orchestrator verification.
 - `coerce_none_fields` fires for any dict-validation path into `EntityEdge` (e.g. `model_validate`); this matches the
   legacy patch's construction-site behavior but is broader than strict constructor-only semantics.
 - CommunityNode/EpisodicNode `summary=None` (non-EntityNode) is not hardened — out of the legacy installer scope.
+- Full `uv sync --extra dev --frozen` is not reproducible on Windows/Python 3.14 (`kuzu==0.11.3` build failure) —
+  an environment limitation, not a product failure.
 
 ## Follow-Up Tasks
 
-- Orchestrator: run `uv run pytest tests/test_model_none_hardening.py`, `make lint`, and the CI unit gate.
 - Later Phase C steps: migrate remaining Menhir installers; finally remove the Menhir-side patch applications (this
   change does NOT claim the Menhir patches are removed).
+- Separate orchestrator closeout commit for this wrapup metadata adjustment.
