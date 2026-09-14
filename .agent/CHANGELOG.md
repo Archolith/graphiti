@@ -1,5 +1,28 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase D1: native anti-conflation counterexample in per-entity dedup prompts (fork half of installer #11)
+
+- `graphiti_core/prompts/dedupe_nodes.py`: both active per-entity dedup prompts (`node` and `nodes`,
+  including the `versions['node']`/`versions['nodes']` entries, which already point directly at the
+  functions) now render Menhir's anti-conflation counterexample exactly once in their `<EXAMPLE>`
+  blocks: NEW ENTITY `"the suburbs"` against an existing `Chicago` (Location, summary "A city where
+  someone lives") resolving to `duplicate_candidate_id = -1`, explaining that relative/descriptive
+  locations (the suburbs, downtown, countryside) are never the same object as a specific named city
+  merely because they are related or appear in movement context. Rendered JSON braces match the
+  surrounding native examples; the escaped-brace artifacts of the Menhir runtime patch
+  (`_patch_graphiti_dedup_prompt`) were not carried over. Existing examples and the response contract
+  are unchanged; `node_list` (the separate UUID-grouping prompt) is deliberately untouched — it is
+  outside installer #11. This implements the policy directly in the existing prompt functions: no
+  wrappers, no runtime rebinding, no identity-gate logic (#12), no other Menhir policy.
+- `tests/test_dedupe_nodes_prompt.py`: NEW focused suite (10 tests) covering both direct prompt
+  functions and the `versions` entries: the counterexample renders exactly once in each, the
+  `versions` map keeps its original shape and function identity, `node_list` shows no leakage of the
+  new example, existing examples and the response contract remain intact, and no prompt function
+  mutates its context argument.
+- `.agent/architecture.md`: NEW "Dedup Prompt Anti-Conflation Policy" section. Scope: fork half of
+  installer #11 only; Menhir-side runtime patch removal remains Phase F. Verification: NOT RUN by the
+  worker (Codex owns tests, static checks, git, grading, and publication).
+
 ## 2026-09-14 — Phase C1g: native single-episode combined-extraction routing + neutral extraction hook (fork half of installer #1)
 
 - `graphiti_core/graphiti.py`: `add_episode` now routes ordinary single-episode extraction through the existing

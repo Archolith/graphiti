@@ -94,6 +94,22 @@ and does not include `context['attributes']` in the prompt (upstream v0.29.3 ins
 renders an ATTRIBUTES block). This mirrors the active Menhir patch and narrows the function to summary-only
 output; it is an intentional tradeoff of this fork, not an omission.
 
+## Dedup Prompt Anti-Conflation Policy (fork half of installer #11)
+
+`graphiti_core/prompts/dedupe_nodes.py` implements Menhir's anti-conflation node-dedup prompt policy
+natively in both active per-entity dedup prompts, `node` and `nodes` (including the corresponding
+`versions['node']`/`versions['nodes']` entries, which point directly at the functions — no wrappers or
+runtime rebinding). Both prompts' `<EXAMPLE>` blocks carry an additional counterexample: a NEW
+ENTITY of `"the suburbs"` against an existing `Chicago` (Location, summary "A city where someone
+lives") resolving to `duplicate_candidate_id = -1`, with an explanation that relative/descriptive
+locations (the suburbs, downtown, countryside) are never the same object as a specific named city
+merely because they are related or appear in movement context. The example is rendered exactly once
+per prompt with the same native JSON brace style as the surrounding examples (no escaped-brace
+artifacts from the original Menhir runtime patch, `_patch_graphiti_dedup_prompt`). Existing examples
+and the response contract are unchanged, and `node_list` (the separate UUID-grouping prompt) is
+deliberately outside this policy and untouched. Identity-gate logic remains installer #12 and is not
+part of this phase.
+
 ## Single-Episode Extraction Routing (native, fork)
 
 `Graphiti.add_episode` routes single-episode extraction through the existing combined extractor

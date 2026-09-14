@@ -149,6 +149,10 @@ Result: duplicate_candidate_id = -1 (same name but distinct real-world things)
 NEW ENTITY: "Marco's car"
 EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Marco's vehicle", "entity_types": ["Entity"], "summary": "Marco drives a red sedan."}}]
 Result: duplicate_candidate_id = 0 (synonym — "car" and "vehicle" refer to the same thing, same possessor)
+
+NEW ENTITY: "the suburbs"
+EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Chicago", "entity_types": ["Location"], "summary": "A city where someone lives"}}]
+Result: duplicate_candidate_id = -1 (relative/descriptive locations such as the suburbs, downtown, or countryside are never the same object as a specific named city merely because they are related or appear in movement context)
 </EXAMPLE>
 """,
         ),
@@ -214,6 +218,10 @@ Result: duplicate_candidate_id = -1 (same name but distinct real-world things)
 ENTITY: "Marco's car"
 EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Marco's vehicle", "entity_types": ["Entity"], "summary": "Marco drives a red sedan."}}]
 Result: duplicate_candidate_id = 0 (synonym — "car" and "vehicle" refer to the same thing, same possessor)
+
+ENTITY: "the suburbs"
+EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Chicago", "entity_types": ["Location"], "summary": "A city where someone lives"}}]
+Result: duplicate_candidate_id = -1 (relative/descriptive locations such as the suburbs, downtown, or countryside are never the same object as a specific named city merely because they are related or appear in movement context)
 </EXAMPLE>
 """,
         ),
