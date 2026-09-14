@@ -1,5 +1,89 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase C1g: native single-episode combined-extraction routing + neutral extraction hook (fork half of installer #1)
+
+- `graphiti_core/graphiti.py`: `add_episode` now routes ordinary single-episode extraction through the existing
+  combined extractor (`combined_extraction.extract_nodes_and_edges`) natively — one LLM call for both nodes and
+  edges — replacing the separate `extract_nodes` then `extract_edges` sequence. This is the **fork half** of Menhir
+  installer #1 (`_patch_graphiti_combined_extraction`); the Menhir policy wiring and removal of installers #1/#2
+  remain Phase F. The combined default is a deliberate fork divergence from upstream v0.29.3 (whose hook-absent
+  behavior is always the separate path). Route selection lives in new `Graphiti._extract_single_episode`: default
+  route is `COMBINED`, with a required `SEPARATE` fallback when custom edge schemas (`edge_types`) are supplied —
+  a deliberate compatibility boundary that keeps custom-schema episodes on the exact pre-C1g upstream/installer
+  path (NOT because attribute handling is missing: combined-route edges also pass through
+  `resolve_extracted_edges`, which performs the downstream typed-attribute work). Combined/hook edges are carried
+  into resolution via a new
+  `precomputed_edges` keyword on `Graphiti._extract_and_resolve_edges` (which skips `extract_edges` when set) —
+  plain per-call arguments, no module-symbol rebinding, no `ContextVar`, no cross-request leakage, nothing to
+  reset on exception or cancellation. The `add_episode` span gains an `extraction.route` attribute (`combined`,
+  `separate`, or `hook`). Bulk routing is unchanged.
+- `graphiti_core/extraction_routing.py`: NEW neutral typed extension hook module.
+  `SingleEpisodeExtractionHook` is a runtime-checkable protocol invoked once per `add_episode` call with a frozen
+  `SingleEpisodeExtractionContext` — borrowed request-local inputs (clients, episode, previous episodes,
+  entity/edge type maps, custom instructions); the container is frozen but its contents are shared with the call
+  and hooks must not mutate them (no runtime immutability is enforced). Returns: `None` (default routing),
+  `ExtractionRoute` (`COMBINED`/`SEPARATE` forced; Graphiti
+  still extracts), or `SingleEpisodeExtractionResult` (nodes/edges/index-map supplied by the hook; Graphiti skips
+  its own extraction and resolves/persists them natively). Any other return value raises `TypeError`; hook
+  exceptions (including `asyncio.CancelledError`) propagate with no state to reset. The hook parameter defaults to
+  absent; the fork's combined default route itself is the new hook-absent behavior (a divergence from upstream).
+  The hook carries no Menhir receipt, canonical-self, repair, marker, grounding,
+  titled-list, counter, scheduler, or telemetry policy — it is deliberately policy-free for Phase F to build on.
+- `tests/test_extraction_routing.py`: NEW focused suite (17 tests) covering default route selection (combined for
+  `None`/`{}`, separate for custom edge schemas), hook route forcing in both directions, hook-provided results
+  skipping built-in extraction, request-local context delivery (identity of the edge-type map asserted), invalid
+  hook returns (`TypeError`), exception and
+  cancellation propagation with a still-usable instance, concurrent routing isolation across two instances,
+  precomputed edges skipping `extract_edges` while the separate fallback still calls it, a DB-free public
+  `add_episode` wiring test proving the combined route invokes the combined extractor, carries precomputed edges
+  into `resolve_extracted_edges`, never calls `extract_nodes`/`extract_edges`, and records the
+  `extraction.route=combined` span attribute, a structural AST check that the routing mechanism imports no
+  `menhir` module, and protocol runtime-checkability. No DB required.
+- `.agent/architecture.md`: NEW "Single-Episode Extraction Routing" section (route policy, hook contract, edge
+  carrying, state semantics, upstream divergence disclosure); bootstrap-state line updated. `.agent/data_models.md`:
+  NEW routing contract entry.
+- Scope: fork half of installer #1 only. Follows C1a–C1f. Menhir-side runtime patches (installers #1/#2 included)
+  are NOT removed yet (Phase F). Verification: the worker ran no tests/tools (Codex owns verification and git).
+  Codex final acceptance run (post-correction): focused pytest `17 passed, 1 warning`; Ruff check on the three
+  changed Python files PASS; Ruff format `3 files already formatted`; changed-file Pyright 3 files,
+  0 errors/warnings/info; cumulative no-external-database suite `500 passed, 11 skipped, 3 warnings`;
+  repository-wide Ruff PASS; artifact validation `8 records, 0 findings`; `git diff --check` exit 0 (informational
+  LF/CRLF warnings only). Change boundary: six product files (`graphiti_core/graphiti.py`,
+  `graphiti_core/extraction_routing.py`, `tests/test_extraction_routing.py`, `.agent/architecture.md`,
+  `.agent/data_models.md`, `.agent/CHANGELOG.md`) plus the separate wrapup file; harness task file absent.
+- Review Corrections (Codex independent review round 1, 2026-09-14): (1) P1 test fixes — the context test now
+  passes its own edge-type map through to the routing call so the identity assertion is meaningful; both
+  edge-resolution tests define `resolve_edge_pointers` as a plain sync function (the real function is sync; async
+  stubs leaked unawaited coroutines); the no-Menhir prose-token scan was replaced with a structural AST check
+  (imports only; policy-neutral documentation may name excluded concepts). (2) P2 module contract — the new
+  `extraction_routing.py` previously had two consecutive top-level string literals (the second a dead expression,
+  triggering 7x E402 and losing `__doc__`); the license header and module documentation are now one real
+  docstring. (3) P2 factual fix — installer #1 is `_patch_graphiti_combined_extraction`, not
+  `_patch_graphiti_add_episode_combined`; corrected everywhere. (4) P2 compatibility claim corrected — hook-absent
+  behavior deliberately changes from upstream's separate path to the fork's combined default; "public defaults
+  unchanged" claims removed; the hook parameter defaults to absent while the route default is the fork's own.
+  (5) P2 fallback rationale corrected — the SEPARATE custom-schema route is a deliberate compatibility boundary;
+  combined edges do reach `resolve_extracted_edges` (typed-attribute work happens there), so the previous
+  "machinery absent" claim was false and is removed from module docstring, architecture, data models, changelog,
+  and wrapup. (6) P2 context overclaim corrected — `SingleEpisodeExtractionContext` is documented as borrowed,
+  request-local inputs over a frozen container with shared mutable contents (no enforced immutability); hooks must
+  not mutate them. (7) P2 coverage — added `test_add_episode_combined_route_wiring_end_to_end`, a DB-free mocked
+  public `add_episode` test proving wiring, edge carrying, no separate extractor on the ordinary route, and the
+  span attribute; test count 16 → 17. (8) P3 — structural menhir-import check replaces token scanning.
+  (9) P3 — `graphiti_core/graphiti.py` and the test file hand-adjusted toward Ruff format style.
+- Review Corrections (Codex independent review round 2, 2026-09-14): (10) P2 test determinism —
+  `test_default_policy_routes_combined` compared `index_map` against a fresh `_combined_fixture()[2]` with new
+  UUIDs; it now asserts `{node.uuid: [0] for node in nodes}` over the nodes returned in the same result.
+  (11) P2 Pyright — the integration test's `fake_process_episode_data` stub renamed its first parameter `ep` to
+  `episode` and was given the full compatible parameter list
+  (`episode, nodes, entity_edges, now, group_id, saga=None, saga_previous_episode_uuid=None,
+  node_episode_index_map=None`) so instance-attribute assignment matches the real method signature.
+  (12) P3 exact formatter output — the `add_episode` unpacking assignment rewritten to Ruff format's exact
+  tuple-shape (`(a, b, c, d) = await ...` with one element per line), and the bare-LF line ending on
+  `_extract_and_resolve_edges`'s   `Returns` docstring line normalized to the file's CRLF endings (zero bare-LF
+  lines remain in the file). Cumulative review tally: 12 corrected findings — 1x P1, 8x P2, 3x P3; all closed,
+  no open findings. Codex final acceptance verification recorded in the Scope bullet above.
+
 ## 2026-09-14 — Phase C1f: native entity-record tolerance + neutral group-id resolver hook (provider compatibility)
 
 - `graphiti_core/nodes.py`: `get_entity_node_from_record` now implements the **fork half** of Menhir installer #6

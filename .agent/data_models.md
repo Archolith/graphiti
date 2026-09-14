@@ -143,3 +143,36 @@ the fork and stays with Phase F.
   keys never re-log; logs carry record identity and the chosen group/original timestamp, never attributes.
 - `search/search_utils.py` already imports this function object, so all search call sites get the native behavior
   with no symbol rebinding.
+
+## Single-Episode Extraction Routing Contract (native, fork)
+
+`Graphiti.add_episode` (`graphiti_core/graphiti.py`) routes single-episode extraction through the combined
+extractor by default — a deliberate fork divergence from upstream v0.29.3's separate path — with a typed neutral
+hook defined in `graphiti_core/extraction_routing.py`:
+
+- `ExtractionRoute` (`str` enum): `COMBINED` (one LLM call via
+  `combined_extraction.extract_nodes_and_edges`) or `SEPARATE` (upstream two-call `extract_nodes` then
+  `extract_edges` path).
+- `default_extraction_route(edge_types)`: `SEPARATE` when `edge_types` is non-empty — a deliberate compatibility
+  boundary that keeps custom-schema episodes on the exact pre-C1g upstream/installer path (NOT because attribute
+  handling is missing: combined-route edges also pass through `resolve_extracted_edges`, which performs the
+  downstream typed-attribute work); `COMBINED` otherwise (`None` and `{}` both route combined).
+- `SingleEpisodeExtractionContext`: frozen dataclass of borrowed request-local extraction inputs (clients, episode,
+  previous_episodes, entity_types, excluded_entity_types, edge_type_map, edge_types,
+  custom_extraction_instructions). The container is frozen (fields cannot be reassigned) but its contents are
+  shared with, and owned by, the in-flight `add_episode` call — they are NOT copied and no runtime immutability is
+  enforced; hooks must treat them as read-only and must not mutate them.
+- `SingleEpisodeExtractionResult`: frozen dataclass (nodes, edges, node_episode_index_map) a hook may return to
+  replace extraction entirely; the index map keys node UUIDs to 0-indexed episode positions.
+- `SingleEpisodeExtractionHook`: runtime-checkable protocol with one method,
+  `async extract_single_episode(context) -> ExtractionRoute | SingleEpisodeExtractionResult | None`. Invoked at
+  most once per `add_episode` call, before extraction. `None` defers to default routing; an `ExtractionRoute`
+  forces a built-in route; a `SingleEpisodeExtractionResult` makes Graphiti skip its own extraction calls and
+  resolve/persist the supplied nodes and edges. Any other return value raises `TypeError`. Hook exceptions,
+  including `asyncio.CancelledError`, propagate unchanged.
+
+State semantics: route choice and edges travel as per-call function arguments only (`_extract_single_episode`
+returns the edges; `_extract_and_resolve_edges(precomputed_edges=...)` skips `extract_edges` when they are
+present). There is no module-global, class-level, or `ContextVar` state, so concurrent `add_episode` calls are
+isolated, exceptions leave nothing to reset, and cancellation is simply task cancellation. The default `add_episode`
+span gains an `extraction.route` attribute (`combined`, `separate`, or `hook`).

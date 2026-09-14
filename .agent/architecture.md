@@ -94,6 +94,43 @@ and does not include `context['attributes']` in the prompt (upstream v0.29.3 ins
 renders an ATTRIBUTES block). This mirrors the active Menhir patch and narrows the function to summary-only
 output; it is an intentional tradeoff of this fork, not an omission.
 
+## Single-Episode Extraction Routing (native, fork)
+
+`Graphiti.add_episode` routes single-episode extraction through the existing combined extractor
+(`graphiti_core/utils/maintenance/combined_extraction.py::extract_nodes_and_edges`) by default — one LLM call
+produces both entity nodes and relationship facts, replacing the upstream two-call `extract_nodes` then
+`extract_edges` sequence. This implements the fork half of Menhir installer #1 (`_patch_graphiti_combined_extraction`)
+natively: the installer previously rebound module symbols (`extract_nodes`/`extract_edges`) and carried edges via a
+`ContextVar` cache; the fork now routes through ordinary call arguments. This default route is a deliberate
+divergence from upstream v0.29.3, whose hook-absent behavior is always the separate path.
+`Graphiti._extract_single_episode` owns route selection, and
+`Graphiti._extract_and_resolve_edges` accepts `precomputed_edges` so combined/hook edges skip `extract_edges` and
+flow directly into `resolve_extracted_edges`. Edges are carried per-call only — no module-global state, no
+`ContextVar`, nothing to reset between requests.
+
+Route policy: `COMBINED` for ordinary schemas; `SEPARATE` fallback when custom edge schemas (`edge_types`) are
+supplied. The fallback is a deliberate compatibility boundary, not a functional gap: combined-route edges also pass
+through `resolve_extracted_edges` (which performs the downstream typed-attribute work), so the SEPARATE route
+exists to keep custom-schema episodes on the exact pre-C1g upstream/installer path rather than to supply missing
+machinery. Bulk routing (`extract_nodes_and_edges_bulk`) is unchanged.
+
+Neutral extension hook: a `SingleEpisodeExtractionHook` (see `graphiti_core/extraction_routing.py`) may be passed
+to `Graphiti(...)` at construction. It is invoked once per `add_episode` call with a frozen
+`SingleEpisodeExtractionContext` — borrowed request-local inputs (clients, episode, previous episodes, type maps,
+custom instructions); the container is frozen but its contents are shared with the call and hooks must not mutate
+them — and returns:
+
+- `None` — default route selection;
+- `ExtractionRoute` (`COMBINED`/`SEPARATE`) — force a built-in route; Graphiti still performs extraction;
+- `SingleEpisodeExtractionResult` — the hook performed extraction; Graphiti skips its own extraction calls and
+  feeds the supplied nodes/edges/index-map into native resolution, attribute extraction, and persistence.
+
+Any other return value raises `TypeError`; hook exceptions (including cancellation) propagate and abort the call,
+leaving no state to reset. The hook parameter defaults to absent; with no hook installed, behavior is the fork's
+default routing above (combined by default — itself a divergence from upstream). The hook is
+policy-free: it carries no Menhir receipt, marker, repair, or telemetry semantics — Phase F will wire Menhir
+policy on top of this hook and remove installers #1/#2.
+
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.
@@ -107,7 +144,9 @@ output; it is an intentional tradeoff of this fork, not an omission.
 ## Current Bootstrap State vs Future Migration
 
 Current: upstream `v0.29.3` tree with Phase C migrations landed in fork source (model None-hardening, response
-normalization, native prompt JSON serialization, native structured summary prompts — see `.agent/CHANGELOG.md`);
+normalization, native prompt JSON serialization, native structured summary prompts, combined-extraction model
+sanitization, native single-episode combined-extraction routing with a neutral extraction hook — see
+`.agent/CHANGELOG.md`);
 Menhir runtime patches remain installed
 until Phase F. Menhir remote structural ingest is deferred (known unavailable capability; do not invent
 `.agent/project-id`).

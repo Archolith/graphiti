@@ -39,6 +39,13 @@ from graphiti_core.edges import (
 )
 from graphiti_core.embedder import EmbedderClient, OpenAIEmbedder
 from graphiti_core.errors import EdgeNotFoundError, NodeNotFoundError
+from graphiti_core.extraction_routing import (
+    ExtractionRoute,
+    SingleEpisodeExtractionContext,
+    SingleEpisodeExtractionHook,
+    SingleEpisodeExtractionResult,
+    default_extraction_route,
+)
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import (
     get_default_group_id,
@@ -83,6 +90,7 @@ from graphiti_core.utils.bulk_utils import (
     retrieve_previous_episodes_bulk,
 )
 from graphiti_core.utils.datetime_utils import utc_now
+from graphiti_core.utils.maintenance.combined_extraction import extract_nodes_and_edges
 from graphiti_core.utils.maintenance.community_operations import (
     build_communities,
     remove_communities,
@@ -148,6 +156,7 @@ class Graphiti:
         max_coroutines: int | None = None,
         tracer: Tracer | None = None,
         trace_span_prefix: str = 'graphiti',
+        single_episode_extraction_hook: SingleEpisodeExtractionHook | None = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -184,6 +193,12 @@ class Graphiti:
             An OpenTelemetry tracer instance for distributed tracing. If not provided, tracing is disabled (no-op).
         trace_span_prefix : str, optional
             Prefix to prepend to all span names. Defaults to 'graphiti'.
+        single_episode_extraction_hook : SingleEpisodeExtractionHook | None, optional
+            Optional extension hook invoked before each single-episode
+            extraction in :meth:`add_episode`. See
+            :mod:`graphiti_core.extraction_routing`. When absent, Graphiti uses
+            its default routing: combined extraction for ordinary schemas and
+            the separate path when custom edge schemas are supplied.
 
         Returns
         -------
@@ -243,6 +258,9 @@ class Graphiti:
         # Initialize namespace API (graphiti.nodes.entity.save(), etc.)
         self.nodes = NodeNamespace(self.driver, self.embedder)
         self.edges = EdgeNamespace(self.driver, self.embedder)
+
+        # Optional single-episode extraction extension hook (neutral; no policy)
+        self.single_episode_extraction_hook = single_episode_extraction_hook
 
         # Capture telemetry event
         self._capture_initialization_telemetry()
@@ -601,6 +619,81 @@ class Graphiti:
         """
         await self.driver.build_indices_and_constraints(delete_existing)
 
+    async def _extract_single_episode(
+        self,
+        episode: EpisodicNode,
+        previous_episodes: list[EpisodicNode],
+        entity_types: dict[str, type[BaseModel]] | None,
+        excluded_entity_types: list[str] | None,
+        edge_type_map: dict[tuple[str, str], list[str]],
+        edge_types: dict[str, type[BaseModel]] | None,
+        custom_extraction_instructions: str | None,
+    ) -> tuple[
+        list[EntityNode], list[EntityEdge] | None, dict[str, list[int]], ExtractionRoute | None
+    ]:
+        """Run single-episode extraction via the routing hook and built-in routes.
+
+        Returns
+        -------
+        tuple[list[EntityNode], list[EntityEdge] | None, dict[str, list[int]], ExtractionRoute | None]
+            A tuple of (extracted_nodes, extracted_edges_or_None,
+            node_episode_index_map, route_used). ``extracted_edges`` is not
+            ``None`` for the combined and hook-provided routes, meaning the
+            caller must skip ``extract_edges`` and carry these edges into edge
+            resolution. ``route_used`` is ``None`` when the hook supplied the
+            extraction itself.
+        """
+        hook = self.single_episode_extraction_hook
+        override = None
+        if hook is not None:
+            override = await hook.extract_single_episode(
+                SingleEpisodeExtractionContext(
+                    clients=self.clients,
+                    episode=episode,
+                    previous_episodes=previous_episodes,
+                    entity_types=entity_types,
+                    excluded_entity_types=excluded_entity_types,
+                    edge_type_map=edge_type_map,
+                    edge_types=edge_types,
+                    custom_extraction_instructions=custom_extraction_instructions,
+                )
+            )
+            if override is not None and not isinstance(
+                override, (ExtractionRoute, SingleEpisodeExtractionResult)
+            ):
+                raise TypeError(
+                    'single_episode_extraction_hook must return None, ExtractionRoute, '
+                    f'or SingleEpisodeExtractionResult, got {type(override).__name__}'
+                )
+
+        if isinstance(override, SingleEpisodeExtractionResult):
+            return override.nodes, override.edges, override.node_episode_index_map, None
+
+        route: ExtractionRoute = override or default_extraction_route(edge_types)
+
+        if route is ExtractionRoute.COMBINED:
+            nodes, edges, node_episode_index_map = await extract_nodes_and_edges(
+                self.clients,
+                episode,
+                previous_episodes,
+                entity_types=entity_types,
+                excluded_entity_types=excluded_entity_types,
+                edge_type_map=edge_type_map,
+                edge_types=edge_types,
+                custom_extraction_instructions=custom_extraction_instructions,
+            )
+            return nodes, edges, node_episode_index_map, route
+
+        nodes, node_episode_index_map = await extract_nodes(
+            self.clients,
+            episode,
+            previous_episodes,
+            entity_types,
+            excluded_entity_types,
+            custom_extraction_instructions,
+        )
+        return nodes, None, node_episode_index_map, route
+
     async def _extract_and_resolve_nodes(
         self,
         episode: EpisodicNode | list[EpisodicNode],
@@ -639,8 +732,18 @@ class Graphiti:
         nodes: list[EntityNode],
         uuid_map: dict[str, str],
         custom_extraction_instructions: str | None = None,
+        precomputed_edges: list[EntityEdge] | None = None,
     ) -> tuple[list[EntityEdge], list[EntityEdge], list[EntityEdge]]:
-        """Extract edges from episode(s) and resolve against existing graph.
+        """Extract edges from episode(s) and resolve against the existing graph.
+
+        Parameters
+        ----------
+        precomputed_edges : list[EntityEdge] | None
+            Edges already produced for this episode (e.g. by the combined
+            extractor or an extraction hook). When provided, ``extract_edges``
+            is skipped and these edges are carried into resolution directly.
+            They travel as a plain function argument for this single call —
+            there is no module-global or context-local edge cache.
 
         Returns
         -------
@@ -653,16 +756,19 @@ class Graphiti:
         episodes = episode if isinstance(episode, list) else [episode]
         primary_episode = episodes[0]
 
-        extracted_edges = await extract_edges(
-            self.clients,
-            episode,
-            extracted_nodes,
-            previous_episodes,
-            edge_type_map,
-            group_id,
-            edge_types,
-            custom_extraction_instructions,
-        )
+        if precomputed_edges is not None:
+            extracted_edges = precomputed_edges
+        else:
+            extracted_edges = await extract_edges(
+                self.clients,
+                episode,
+                extracted_nodes,
+                previous_episodes,
+                edge_type_map,
+                group_id,
+                edge_types,
+                custom_extraction_instructions,
+            )
 
         edges = resolve_edge_pointers(extracted_edges, uuid_map)
 
@@ -1053,6 +1159,13 @@ class Graphiti:
         deduplication, and database updates. It also handles embedding generation
         and edge invalidation.
 
+        Extraction runs through a single combined LLM call by default. Episodes
+        with custom edge schemas (``edge_types``) use the separate
+        ``extract_nodes``/``extract_edges`` path, and a
+        ``single_episode_extraction_hook`` installed at construction time can
+        override the route or supply the extraction itself (see
+        :mod:`graphiti_core.extraction_routing`).
+
         It is recommended to run this method as a background process, such as in a queue.
         It's important that each episode is added sequentially and awaited before adding
         the next one. For web applications, consider using FastAPI's background tasks
@@ -1118,13 +1231,22 @@ class Graphiti:
                     else {('Entity', 'Entity'): []}
                 )
 
-                # Extract and resolve nodes
-                extracted_nodes, node_episode_index_map = await extract_nodes(
-                    self.clients,
+                # Extract nodes and edges for this episode. By default this is a
+                # single combined LLM call; custom edge schemas fall back to the
+                # separate extract_nodes/extract_edges path, and an installed
+                # extraction hook may force a route or supply the extraction.
+                (
+                    extracted_nodes,
+                    precomputed_edges,
+                    node_episode_index_map,
+                    extraction_route,
+                ) = await self._extract_single_episode(
                     episode,
                     previous_episodes,
                     entity_types,
                     excluded_entity_types,
+                    edge_type_map or edge_type_map_default,
+                    edge_types,
                     custom_extraction_instructions,
                 )
 
@@ -1136,7 +1258,9 @@ class Graphiti:
                     entity_types,
                 )
 
-                # Extract and resolve edges in parallel with attribute extraction
+                # Resolve edges, carrying edges already produced by the combined
+                # extractor or hook so extract_edges only runs on the separate
+                # route.
                 (
                     resolved_edges,
                     invalidated_edges,
@@ -1151,6 +1275,7 @@ class Graphiti:
                     nodes,
                     uuid_map,
                     custom_extraction_instructions,
+                    precomputed_edges=precomputed_edges,
                 )
 
                 entity_edges = resolved_edges + invalidated_edges
@@ -1199,6 +1324,9 @@ class Graphiti:
                         'episode.source': source.value,
                         'episode.reference_time': reference_time.isoformat(),
                         'group_id': group_id,
+                        'extraction.route': (
+                            extraction_route.value if extraction_route is not None else 'hook'
+                        ),
                         'node.count': len(hydrated_nodes),
                         'edge.count': len(entity_edges),
                         'edge.invalidated_count': len(invalidated_edges),
