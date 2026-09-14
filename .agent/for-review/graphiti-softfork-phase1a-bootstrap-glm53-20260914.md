@@ -6,7 +6,9 @@
 - **Plan:** menhir-graphiti-soft-fork-migration Phase B / Phase 1A bootstrap docs
 - **Worktree:** `C:\Users\thron\IdeaProjects\.agent\worktrees\graphiti-menhir-0293`
 - **Branch:** `menhir/0.29.3` (baseline: upstream `getzep/graphiti` tag `v0.29.3`, exact commit `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`)
-- **Commits:** UNCOMMITTED — orchestrator owns Git and will commit only after independent verification.
+- **Commits:** `7fb3ad0959f75ce03a4104d185736d574d037caf` — orchestrator-accepted and committed Phase 1A product after
+  independent review. This wrapup metadata adjustment will be committed separately by the orchestrator (that closeout
+  commit does not exist yet).
 
 ## Summary
 
@@ -43,7 +45,7 @@ packaging, or dependency changes.
 | Claim | Verified? |
 |-------|-----------|
 | Files-changed list matches actual edits | yes |
-| No commits made | yes (UNCOMMITTED by design) |
+| Commit anchor accurate | yes — Phase 1A product committed by orchestrator at `7fb3ad0959f75ce03a4104d185736d574d037caf`; hash verified read-only via `git rev-parse 7fb3ad0` |
 | Baseline SHA/branch documented exactly | yes |
 | No claim that semantic migration or tests are complete | yes |
 | Data-model fields verified against source | yes — every listed field re-checked against `graphiti_core/nodes.py` and `graphiti_core/edges.py` after Codex review found defects; the earlier "no invented fields" claim was removed and the inventory was corrected |
@@ -83,10 +85,11 @@ packaging, or dependency changes.
 
 - Documentation claims (e.g. env variable defaults in `architecture.md`) were written from source inspection and not
   runtime-verified.
-- No git operations were performed; all work is uncommitted in the worktree.
+- This wrapup metadata adjustment is not yet committed; the orchestrator will commit it separately from the product
+  commit `7fb3ad0959f75ce03a4104d185736d574d037caf`.
 
 ## Follow-Up Tasks
 
-- Orchestrator: independently verify and commit the seven files.
+- Orchestrator: commit this wrapup metadata adjustment separately (product commit already exists at `7fb3ad0`).
 - Future phases: begin semantic migration with labeled fork commits; revisit structural ingest when the capability
   becomes available.
