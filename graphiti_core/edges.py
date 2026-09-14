@@ -22,7 +22,7 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing_extensions import LiteralString
 
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
@@ -265,7 +265,7 @@ class EntityEdge(Edge):
     fact: str = Field(description='fact representing the edge and nodes that it connects')
     fact_embedding: list[float] | None = Field(default=None, description='embedding of the fact')
     episodes: list[str] = Field(
-        default=[],
+        default_factory=list,
         description='list of episode ids that reference these entity edges',
     )
     expired_at: datetime | None = Field(
@@ -284,9 +284,29 @@ class EntityEdge(Edge):
         default={}, description='Additional attributes of the edge. Dependent on edge name'
     )
 
+    @model_validator(mode='before')
+    @classmethod
+    def coerce_none_fields(cls, data: Any) -> Any:
+        # Degenerate LLM output can supply explicit Nones for required fields.
+        # An explicit None behaves like omission so default factories run for
+        # uuid/episodes; the other required str fields coerce to ''.
+        if isinstance(data, dict):
+            data = dict(data)
+            for field in ('uuid', 'episodes'):
+                if data.get(field) is None:
+                    data.pop(field, None)
+            for field in ('group_id', 'name', 'fact', 'source_node_uuid', 'target_node_uuid'):
+                if field in data and data[field] is None:
+                    data[field] = ''
+        return data
+
     async def generate_embedding(self, embedder: EmbedderClient):
         start = time()
 
+        # Assignment paths (e.g. object.__setattr__) can leave fact as None;
+        # degrade to the empty string instead of crashing on .replace.
+        if self.fact is None:
+            self.fact = ''
         text = self.fact.replace('\n', ' ')
         self.fact_embedding = await embedder.create(input_data=[text])
 

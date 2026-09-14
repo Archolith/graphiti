@@ -503,8 +503,21 @@ class EntityNode(Node):
         default={}, description='Additional attributes of the node. Dependent on node labels'
     )
 
+    @field_validator('summary', mode='before')
+    @classmethod
+    def coerce_none_summary(cls, value: Any) -> Any:
+        # An explicit summary=None (e.g. a null from the extraction LLM) behaves
+        # the same as omission: the str default factory yields ''.
+        if value is None:
+            return ''
+        return value
+
     async def generate_name_embedding(self, embedder: EmbedderClient):
         start = time()
+        # Assignment-based construction paths can leave name as None; embedding
+        # must degrade to the empty string instead of crashing on .replace.
+        if self.name is None:
+            self.name = ''
         text = self.name.replace('\n', ' ')
         self.name_embedding = await embedder.create(input_data=[text])
         end = time()
@@ -716,6 +729,8 @@ class CommunityNode(Node):
 
     async def generate_name_embedding(self, embedder: EmbedderClient):
         start = time()
+        if self.name is None:
+            self.name = ''
         text = self.name.replace('\n', ' ')
         self.name_embedding = await embedder.create(input_data=[text])
         end = time()

@@ -52,3 +52,19 @@ Base class: `Edge` (same file) carries `uuid`, `group_id`, `source_node_uuid`, `
   `CommunityNodeNamespace`, `EntityEdgeNamespace`, `EpisodicEdgeNamespace`, `CommunityEdgeNamespace`).
 
 Do not invent fields not present in the source; the models above are the authoritative surface at v0.29.3.
+
+## None-Hardening Contract (native, fork)
+
+These models enforce None-tolerance natively via Pydantic validators and direct method hardening — no runtime
+patching. This migrates three Menhir installer contracts into the fork source:
+
+- `EntityNode` (Menhir installer #7): an explicit `summary=None` at construction coerces to `''`; omission keeps the
+  `str` default factory (`''`); non-None values pass through unchanged (`coerce_none_summary` before-validator).
+- `EntityEdge` (Menhir installer #8): an explicit `None` for `uuid` and `episodes` is dropped so their default
+  factories run (fresh uuid4 string / fresh empty list); an explicit `None` for the required str fields `group_id`,
+  `name`, `fact`, `source_node_uuid`, `target_node_uuid` coerces to `''`; missing and non-None values keep upstream
+  behavior (`coerce_none_fields` before model-validator). `episodes` uses `default_factory=list` (no shared default).
+- Embedding safety (Menhir installer #5): `EntityEdge.generate_embedding` hardens `fact is None` and
+  `EntityNode`/`CommunityNode.generate_name_embedding` harden `name is None` to `''` before calling the embedder, so
+  newline replacement cannot crash; observable behavior matches the legacy wrapper (field ends as `''`, embedder
+  receives the empty string).

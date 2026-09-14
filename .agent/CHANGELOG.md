@@ -1,5 +1,22 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase C: native None-hardening for models (migrates Menhir installers #5/#7/#8)
+
+- `graphiti_core/nodes.py`: `EntityNode` gains a `coerce_none_summary` before-validator (explicit `summary=None`
+  becomes `''`); `EntityNode.generate_name_embedding` and `CommunityNode.generate_name_embedding` harden a `None`
+  name to `''` before embedding (Menhir installer #5 semantics, and #7 for the summary coercion).
+- `graphiti_core/edges.py`: `EntityEdge` gains a `coerce_none_fields` before model-validator — explicit `None` for
+  `uuid`/`episodes` drops the key so default factories run; explicit `None` for `group_id`, `name`, `fact`,
+  `source_node_uuid`, `target_node_uuid` coerces to `''` (Menhir installer #8). `generate_embedding` hardens a `None`
+  fact to `''` before embedding (Menhir installer #5). `episodes` default changed from `default=[]` to
+  `default_factory=list`.
+- `tests/test_model_none_hardening.py`: focused regression tests covering all of the above, distinct default
+  instances, unchanged non-None values, and embedder inputs.
+- `.agent/data_models.md`: documents the native None-hardening contract.
+- Scope: only Menhir installers #5 (`_patch_graphiti_none_replace`), #7 (`_patch_graphiti_node_summary_none`), and #8
+  (`_patch_graphiti_edge_none_fields`) are migrated. The Menhir-side runtime patches themselves are NOT removed yet;
+  other installers remain un-migrated. Tests/lint/typecheck NOT RUN by the worker (orchestrator owns verification).
+
 ## 2026-09-14 — Phase 1A review corrections (Codex independent review)
 
 - `.agent/data_models.md`: corrected model inventory against `graphiti_core/nodes.py`/`edges.py` at v0.29.3 — added
