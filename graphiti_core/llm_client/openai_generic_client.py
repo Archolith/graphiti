@@ -17,18 +17,29 @@ limitations under the License.
 import json
 import logging
 import re
+import time
 import typing
+from dataclasses import replace
 from typing import Any, Literal
 
 import openai
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
+from ..errors import GraphitiRequestTooLargeError
 from ..prompts.models import Message
-from .client import LLMClient, get_extraction_language_instruction
+from .client import LLMClient, get_extraction_language_instruction, is_server_or_retry_error
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
 from .errors import EmptyResponseError, RateLimitError
+from .request_guard import (
+    RequestGuard,
+    build_request_context,
+    build_response_metadata,
+    enforce_request_ceiling,
+    is_context_length_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +75,7 @@ class OpenAIGenericClient(LLMClient):
         client: typing.Any = None,
         max_tokens: int = 16384,
         structured_output_mode: StructuredOutputMode = 'json_schema',
+        request_guard: RequestGuard | None = None,
     ):
         """
         Initialize the OpenAIGenericClient with the provided configuration, cache setting, and client.
@@ -79,6 +91,10 @@ class OpenAIGenericClient(LLMClient):
                 that do not support the ``json_schema`` response format (e.g. DeepSeek); in
                 that mode the schema is injected into the prompt instead of being enforced
                 by the API.
+            request_guard (RequestGuard | None): Optional typed bundle of request-scoped
+                hooks (ceiling resolver, lifecycle hook, failure listener). See
+                :mod:`graphiti_core.llm_client.request_guard`. With no guard the client
+                behaves exactly as before.
 
         """
         # removed caching to simplify the `generate_response` override
@@ -93,6 +109,7 @@ class OpenAIGenericClient(LLMClient):
         # Override max_tokens to support higher limits for local models
         self.max_tokens = max_tokens
         self.structured_output_mode: StructuredOutputMode = structured_output_mode
+        self.request_guard: RequestGuard | None = request_guard
 
         if client is None:
             self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)
@@ -137,12 +154,57 @@ class OpenAIGenericClient(LLMClient):
             stripped = re.sub(r'\r?\n?```[ \t]*$', '', stripped)
         return stripped.strip()
 
+    @staticmethod
+    def _uses_completion_tokens_param(model: str) -> bool:
+        """Return True for model families that require ``max_completion_tokens``.
+
+        gpt-5* and the o-series reasoning models reject the legacy ``max_tokens``
+        parameter; all other models keep using it.
+        """
+        normalized = (model or '').lower()
+        return normalized.startswith(('gpt-5', 'o1', 'o3', 'o4'))
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> str:
+        """Normalize a model response to a JSON payload string.
+
+        Tries a direct parse first. On failure, scans left-to-right and returns the
+        FIRST decodable JSON object/array found (via ``json.JSONDecoder.raw_decode``),
+        so prose-wrapped payloads survive even when the prose contains later brace
+        fragments or trailing malformed spans. When nothing decodes, the original
+        text is returned so the caller's ``json.loads`` raises the original
+        ``JSONDecodeError`` — preserving the existing retry semantics for genuinely
+        retryable parse failures.
+        """
+        try:
+            json.loads(text)
+            return text
+        except json.JSONDecodeError:
+            pass
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char not in '{[':
+                continue
+            try:
+                _, end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                continue
+            return text[index:end]
+        return text
+
+    def _resolve_endpoint(self) -> str | None:
+        """Return the provider endpoint of the underlying client, when discoverable."""
+        base_url = getattr(self.client, 'base_url', None)
+        return str(base_url) if base_url else None
+
     async def _generate_response(
         self,
         messages: list[Message],
         response_model: type[BaseModel] | None = None,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         model_size: ModelSize = ModelSize.medium,
+        group_id: str | None = None,
+        prompt_name: str | None = None,
     ) -> dict[str, typing.Any]:
         openai_messages: list[ChatCompletionMessageParam] = []
         for m in messages:
@@ -151,27 +213,132 @@ class OpenAIGenericClient(LLMClient):
                 openai_messages.append({'role': 'user', 'content': m.content})
             elif m.role == 'system':
                 openai_messages.append({'role': 'system', 'content': m.content})
+
+        model = self.model or DEFAULT_MODEL
+        endpoint = self._resolve_endpoint()
+        guard = self.request_guard
+        context = None
+        request_started: float | None = None
+        if guard is not None:
+            # Request-scoped facts are built fresh per call — no shared mutable state.
+            context = build_request_context(
+                model=model,
+                endpoint=endpoint,
+                messages=openai_messages,
+                group_id=group_id,
+                prompt_name=prompt_name,
+            )
+            if guard.correlation_provider is not None:
+                correlation = guard.correlation_provider.resolve_correlation(context)
+                # The fork owns the final context: only the opaque correlation id is
+                # consumer-suppliable, never the measured structural facts.
+                if isinstance(correlation, str):
+                    context = replace(context, correlation_id=correlation)
+            if guard.ceiling_resolver is not None:
+                ceiling = await guard.ceiling_resolver.resolve_request_ceiling(context)
+                try:
+                    enforce_request_ceiling(context, ceiling)
+                except GraphitiRequestTooLargeError as exc:
+                    if guard.failure_listener is not None:
+                        # Pre-send rejection: no response metadata exists yet.
+                        guard.failure_listener.on_request_failed(
+                            context, exc, 'ceiling_rejected', None
+                        )
+                    raise
+
+        response_metadata = None
         try:
+            if guard is not None and context is not None:
+                if guard.lifecycle_hook is not None:
+                    guard.lifecycle_hook.on_request_started(context)
+                request_started = time.perf_counter()
+            # gpt-5* and o-series models require max_completion_tokens; older models use max_tokens
+            token_kwargs: dict[str, Any] = (
+                {'max_completion_tokens': max_tokens}
+                if self._uses_completion_tokens_param(model)
+                else {'max_tokens': max_tokens}
+            )
             response = await self.client.chat.completions.create(
-                model=self.model or DEFAULT_MODEL,
+                model=model,
                 messages=openai_messages,
                 temperature=self.temperature,
-                max_tokens=max_tokens,
+                **token_kwargs,
                 response_format=self._build_response_format(response_model),  # type: ignore[arg-type]
             )
-            result = response.choices[0].message.content or ''
+            choices = list(getattr(response, 'choices', None) or [])
+            result = (choices[0].message.content or '') if choices else ''
+            if guard is not None and context is not None:
+                duration_ms = (
+                    int((time.perf_counter() - request_started) * 1000)
+                    if request_started is not None
+                    else None
+                )
+                response_metadata = build_response_metadata(
+                    response, raw=result, duration_ms=duration_ms
+                )
+                if guard.lifecycle_hook is not None:
+                    guard.lifecycle_hook.on_request_completed(context, response_metadata)
+            if not choices:
+                raise EmptyResponseError('LLM returned a response with no choices')
             # An empty body (refusal, length finish_reason, or a flaky endpoint) would make
             # json.loads raise a cryptic JSONDecodeError; surface a clear error instead.
             if not result:
                 raise EmptyResponseError('LLM returned an empty response')
             # Many OpenAI-compatible/local models wrap JSON in a ```json fence even under a
-            # structured response_format; strip it before parsing.
-            return json.loads(self._strip_code_fences(result))
+            # structured response_format; strip it before parsing. Prose-wrapped JSON is
+            # normalized to its payload span; unparseable output keeps raising the original
+            # JSONDecodeError so the existing retry semantics apply.
+            return json.loads(self._extract_json_payload(self._strip_code_fences(result)))
         except openai.RateLimitError as e:
+            if guard is not None and context is not None and guard.failure_listener is not None:
+                guard.failure_listener.on_request_failed(context, e, 'provider_error', None)
             raise RateLimitError from e
         except Exception as e:
+            if guard is not None and context is not None and guard.failure_listener is not None:
+                guard.failure_listener.on_request_failed(
+                    context, e, 'provider_error', response_metadata
+                )
+            if is_context_length_error(e):
+                # The payload is deterministic; the provider rejected it for context size.
+                # Retrying unchanged only burns provider calls, and node deduplication
+                # catches GraphitiRequestTooLargeError to bisect the request instead.
+                raise GraphitiRequestTooLargeError(
+                    'Provider rejected the assembled LLM request because it exceeds the '
+                    'model context window.'
+                ) from e
             logger.error(f'Error in generating LLM response: {e}')
             raise
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_random_exponential(multiplier=10, min=5, max=120),
+        retry=retry_if_exception(is_server_or_retry_error),
+        after=lambda retry_state: (
+            logger.warning(
+                f'Retrying {retry_state.fn.__name__ if retry_state.fn else "function"} after {retry_state.attempt_number} attempts...'
+            )
+            if retry_state.attempt_number > 1
+            else None
+        ),
+        reraise=True,
+    )
+    async def _generate_response_with_retry(
+        self,
+        messages: list[Message],
+        response_model: type[BaseModel] | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        model_size: ModelSize = ModelSize.medium,
+        group_id: str | None = None,
+        prompt_name: str | None = None,
+    ) -> dict[str, typing.Any]:
+        return await self._generate_response(
+            messages,
+            response_model,
+            max_tokens,
+            model_size,
+            group_id=group_id,
+            prompt_name=prompt_name,
+        )
 
     async def generate_response(
         self,
@@ -220,7 +387,12 @@ class OpenAIGenericClient(LLMClient):
                 # retry mechanism (same pattern as Gliner2Client); the old hand-rolled
                 # re-prompt loop is intentionally not reinstated.
                 return await self._generate_response_with_retry(
-                    messages, response_model, max_tokens=max_tokens, model_size=model_size
+                    messages,
+                    response_model,
+                    max_tokens=max_tokens,
+                    model_size=model_size,
+                    group_id=group_id,
+                    prompt_name=prompt_name,
                 )
             except Exception as e:
                 span.set_status('error', str(e))

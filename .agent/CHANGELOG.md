@@ -1,5 +1,98 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase E: OpenAI-compatible request guard + context-length normalization (fork mechanism half of installer #17)
+
+- `graphiti_core/llm_client/request_guard.py`: NEW generic, policy-free request-guard
+  module. Conservative documented request sizing (`CHARS_PER_TOKEN = 3`, ceiling
+  division, minimum 1) over the fully assembled provider messages immediately before
+  send; `RequestCeilingResolver` seam resolves the per-request effective ceiling
+  (`None` = no ceiling, `0` = deliberate opt-out that stays disabled, positive int =
+  enforced pre-send); `enforce_request_ceiling` raises the public
+  `GraphitiRequestTooLargeError` (D5) BEFORE the provider call with structural
+  diagnostics only (message count, total chars, largest index/role/char tuples —
+  never prompt content); `is_context_length_error` classifies provider context-limit
+  rejections narrowly (structured `code` and `body.error.code` inspected
+  INDEPENDENTLY so a nested `context_length_exceeded` classifies even under a
+  generic top-level code such as `invalid_request_error`, plus the textual
+  `context_length_exceeded` / `maximum context length` fallbacks); frozen
+  `LLMRequestContext` carries request-scoped structural facts including
+  `group_id` (a partition/namespace, NOT a per-episode key) and `prompt_name` (an
+  operation name), plus an opaque `correlation_id` consumers supply per request (via
+  the correlation provider below — never by writing the measured context);
+  bounded `LLMResponseMetadata` (provider status, response id, raw length,
+  240-char raw-response preview, duration) delivered to hooks so consumers can
+  reproduce their own diagnostics without fork logging policy; immutable
+  `RequestGuard` bundles optional `ceiling_resolver`, `lifecycle_hook`
+  (`on_request_started`/`on_request_completed(context, response)`), and
+  `failure_listener` (`on_request_failed(context, error, phase, response)`) typed
+  protocols, plus a `correlation_provider` (`resolve_correlation(context) ->
+  str | None`) invoked once per request — a deliberately narrow correlation seam:
+  the fork creates the final context via `dataclasses.replace(correlation_id=...)`
+  and a non-string return is ignored, so consumer code cannot alter fork-measured
+  structural sizing facts — all for the
+  Menhir-owned halves (ceiling derivation policy, failure diagnostics, lifecycle
+  telemetry) to be wired in Phase F. No module-global mutable request state, no
+  `ContextVar`, no symbol rebinding.
+- `graphiti_core/llm_client/openai_generic_client.py`: `OpenAIGenericClient` gains an
+  optional `request_guard` constructor parameter. With a guard, each assembled
+  request is sized and ceiling-enforced before send; every provider/send/parse
+  failure — rate limits, context-length normalization, empty responses, parse
+  failures — is observed EXACTLY ONCE through the failure seam with the metadata
+  available at that point (`response=None` for pre-send ceiling rejections and
+  provider-call failures such as rate limits/transport; full metadata including
+  status/id/raw preview on parse and empty-response failures); a provider
+  context-length rejection (structured or textual classification) raises
+  `GraphitiRequestTooLargeError` chained from the provider error and is NOT retried
+  by the tenacity wrapper (`is_server_or_retry_error` does not match it), so
+  deterministic oversized payloads never enter an unchanged retry loop; D5's
+  bisection catches it; translated Graphiti `RateLimitError` and retry behavior are
+  preserved. Rejected requests emit `failure_listener('ceiling_rejected')` and never
+  `on_request_started`. Also: responses with no `choices` raise a clear
+  `EmptyResponseError` instead of `IndexError`; prose-wrapped JSON is normalized by
+  a left-to-right `json.JSONDecoder.raw_decode` scan returning the FIRST decodable
+  object/array — robust against later brace fragments, multiple payload-looking
+  spans, and trailing malformed braces (unparseable output still raises the original
+  `JSONDecodeError`, keeping retry classification unchanged); gpt-5*/o1/o3/o4 models
+  send `max_completion_tokens` instead of legacy `max_tokens`; a subclass tenacity
+  retry wrapper (mirroring the base configuration) threads request-scoped
+  `group_id`/`prompt_name` to `_generate_response`. With no guard the client behaves
+  exactly as before: unchanged `json_schema`/`json_object` handling, code-fence
+  tolerance, empty-response behavior, tracing, multilingual instructions,
+  attribute-extraction framing, and retry semantics for genuinely retryable
+  failures.
+- `tests/llm_client/test_request_guard.py`: NEW. Estimation/diagnostics units;
+  disabled (`None`/`0`), within-ceiling, and oversize-rejection semantics with
+  structural diagnostics and the exact public exception; narrow context-length
+  classification (structured and textual positives; nested `body.error.code`
+  classification under a generic top-level code; unrelated bad requests,
+  parse/schema/auth failures, non-dict bodies negative).
+- `tests/llm_client/test_openai_generic_client_guard.py`: NEW no-network suite:
+  pre-send rejection with zero provider calls; exact exception type; no unchanged
+  retry for both pre-send and provider context-length failures; disabled/within-
+  ceiling behavior; structured/text provider classification; resolver context
+  contents; no-guard and empty-guard legacy compatibility (wire shape, `max_tokens`
+  kwarg); lifecycle started/completed with bounded response metadata (status, id,
+  raw length/preview, duration) and suppression on rejection; failure-metadata seam:
+  parse/empty-response failures expose status/id/raw length/bounded preview exactly
+  once, rate-limit failures are observed exactly once with the translated Graphiti
+  error and `response=None`, context-length failures observed exactly once before
+  normalization, ceiling rejections carry no response metadata; correlation
+  provider populates `correlation_id` for all hooks with no cross-request leakage,
+  and a hostile test proves a tampered non-string return cannot alter any measured
+  fact (model/endpoint/counts/sizes/estimated tokens/largest messages) and leaves
+  `correlation_id` None;
+  adversarial payload extraction (first decodable payload before later fragments,
+  invalid leading spans, multiple valid spans, trailing malformed braces, arrays,
+  nested objects, end-to-end); `max_completion_tokens` vs `max_tokens` model
+  families.
+- `.agent/architecture.md`: NEW "OpenAI-Compatible Request Guard and Context-Length
+  Normalization (fork half of installer #17)" section, separating the generic fork
+  mechanism from Menhir policy.
+- Scope: installer #17 Graphiti-side mechanisms only. Ceiling derivation policy
+  (endpoint probing/caching), failure diagnostics, lifecycle telemetry, and the
+  concise-prompt/truncation-escalation retry loop remain Menhir-owned and outside
+  the fork; Menhir wiring plus installer-#17 removal are Phase F.
+
 ## 2026-09-14 — Phase D5: adaptive dedupe request bisection + neutral node pre-resolution (fork mechanism half of installer #16)
 
 - `graphiti_core/errors.py`: NEW public `GraphitiRequestTooLargeError` (`GraphitiError`

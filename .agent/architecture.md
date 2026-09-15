@@ -313,6 +313,92 @@ telemetry/prompt measurement, or candidate predicates: Menhir's canonical-self
 pre-resolution policy and installer-#16 patch removal are wired/removed in Phase F; the
 exception-raising side is Phase E.
 
+## OpenAI-Compatible Request Guard and Context-Length Normalization (fork half of installer #17)
+
+`graphiti_core/llm_client/request_guard.py` (new in Phase E) and the
+`OpenAIGenericClient` implement the fork-native *mechanism* of Menhir installer #17
+(`_patch_graphiti_openai_generic_client`): generic request sizing, an optional
+pre-send ceiling, and narrow provider context-length classification. The module is
+policy-free — no Menhir imports, environment-variable names, scheduler URLs, or
+lifecycle policy live in the fork.
+
+Request sizing and ceiling. Every assembled provider request is sized immediately
+before send with a documented conservative estimate — char count divided by
+`CHARS_PER_TOKEN = 3` (ceiling division, minimum 1), deliberately pessimistic for
+code-heavy Graphiti prompts; it is an estimate for a guard, not a tokenizer. The
+effective ceiling is resolved per request through a typed
+`RequestCeilingResolver` seam (`async resolve_request_ceiling(context) ->
+int | None`): `None` means no ceiling is configured, `0` is a deliberate opt-out
+(the check stays disabled and derivation policy outside the fork must not re-enable
+it), and a positive int is enforced by `enforce_request_ceiling` BEFORE the provider
+call — an oversize request raises the public `GraphitiRequestTooLargeError`
+(introduced in D5) with structural diagnostics only (message count, total chars,
+largest messages as index/role/char-count tuples; never prompt content). Where the
+ceiling comes from — endpoint/context-window probing, caching, TTLs, per-endpoint
+values — is entirely consumer policy and lives outside the fork.
+
+Context-length normalization. `is_context_length_error` classifies provider
+rejections narrowly: a structured `code` attribute equal to
+`context_length_exceeded`, OR a dict `body` whose `error.code` equals it — the two
+are inspected independently, so a nested `context_length_exceeded` classifies even
+when the top-level code is generic (e.g. `invalid_request_error`) — plus the
+recognized textual fallbacks `context_length_exceeded` / `maximum context length`.
+A provider context-length rejection raises
+`GraphitiRequestTooLargeError` (chained `from` the provider error) inside
+`_generate_response`; it is not retryable by the tenacity wrapper
+(`is_server_or_retry_error` does not match it) and D5's bisection catches it. So a
+deterministic oversized payload never enters an unchanged retry loop. Unrelated bad
+requests and local parse failures do not match the classifier and keep their normal
+behavior.
+
+Typed, request-scoped extension seams (all optional, per Phase F's Menhir halves).
+An immutable `RequestGuard` may be passed to `OpenAIGenericClient(...)` at
+construction bundling: a `ceiling_resolver` (scheduler/context-window probing or
+request-ceiling resolution), a `lifecycle_hook` (`on_request_started` immediately
+before send — after ceiling enforcement, so rejected requests never report as
+started — and `on_request_completed(context, response)` on success), a
+`failure_listener` (`on_request_failed(context, error, phase, response)` with phase
+`'ceiling_rejected'` or `'provider_error'`), and a `correlation_provider`
+(`resolve_correlation(context) -> str | None`, invoked once per request before any
+other hook). Hooks receive a frozen, explicitly bounded `LLMResponseMetadata` —
+provider status, response id, raw length, a 240-character raw-response preview, and
+duration when built on completion — so a consumer can reproduce its own diagnostic
+records (parse failures, empty responses, provider errors) without the fork
+implementing logging policy; the full raw response is never retained by the fork.
+Every provider/send/parse failure — including translated OpenAI rate limits and
+context-length normalization — is observed exactly once through the failure seam;
+pre-send ceiling rejections and provider-call failures (rate limit, transport) carry
+`response=None`. `group_id` is a partition/namespace and `prompt_name` an operation
+name — they are NOT intrinsically a unique per-episode key; consumers needing
+per-request correlation supply an opaque id via the `correlation_provider`, a
+deliberately narrow seam: it receives the immutable measured context and may return
+only a string (or None); the fork itself creates the final context via
+`dataclasses.replace(correlation_id=...)`, so consumer code cannot alter the
+fork-measured structural sizing facts (model, endpoint, counts, sizes, estimated
+tokens, largest messages) before ceiling enforcement. The
+fork keeps no module-global mutable request state, no `ContextVar`, and performs no
+symbol rebinding. Hook and provider exceptions propagate and abort the request with
+no state to reset.
+
+Compatibility. With no guard (or an all-default guard) the client behaves exactly
+as before: same `json_schema`/`json_object` handling, code-fence tolerance,
+empty-response behavior, tracing, multilingual instructions, attribute-extraction
+framing, and retry semantics for genuinely retryable failures (tenacity on
+`RateLimitError`/`EmptyResponseError`/`JSONDecodeError`; a subclass retry wrapper
+exists only to thread request-scoped `group_id`/`prompt_name` through, mirroring
+the base tenacity configuration). Generic response normalization added: responses
+with no `choices` raise a clear `EmptyResponseError` instead of an `IndexError`,
+and prose-wrapped JSON is normalized by a left-to-right
+`json.JSONDecoder.raw_decode` scan that returns the FIRST decodable object/array —
+robust against later brace fragments, multiple payload-looking spans, and trailing
+malformed braces; unparseable output still raises the original `JSONDecodeError`
+so retry classification is unchanged. gpt-5*/o1/o3/o4 models send
+`max_completion_tokens` instead of the rejected legacy `max_tokens` parameter. The
+Menhir halves of #17 — the ceiling derivation policy, failure diagnostics, and
+lifecycle telemetry — are wired through these seams in Phase F, which also removes
+the installer; the Menhir-side concise-prompt/truncation-escalation retry loop
+remains Menhir-owned retry policy and is not ported.
+
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.
