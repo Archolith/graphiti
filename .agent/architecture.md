@@ -227,7 +227,9 @@ configured; with no hook configured, every call path keeps the exact legacy
 positional/keyword shape (the kwarg is omitted entirely, never passed as `None`).
 The candidate-filter and identity-gate hooks compose independently: each is
 forwarded exactly when its own hook is present, and identity edge evidence
-(`identity_gate_edges`) is forwarded only when the identity hook is present. The hook
+(`identity_gate_edges`) is forwarded only when the identity hook is present. The
+pre-resolution hook additionally carries its own `node_pre_resolution_edges` channel
+(never reusing `identity_gate_edges`). The candidate-filter hook
 is policy-free: it carries no `structure_role`/`is_view`/`view_kind`/`view_class`
 predicate, no canonical-self/receipt/telemetry semantics, no logging counts, and no
 source policy — this replaces only the Graphiti-side *mechanism* of Menhir installer
@@ -249,6 +251,67 @@ Typed-schema behavior is unchanged: episode context build, LLM call, capped over
 (no Menhir predicates or names in runtime code); it replaces the Graphiti-side *mechanism* of
 Menhir installer #15 (`_patch_graphiti_untyped_attribute_preservation`, which wrapped
 `_extract_entity_attributes`). Menhir-side patch removal is deferred to Phase F.
+
+## Adaptive Dedupe Request Bisection and Node Pre-Resolution (native, fork half of installer #16)
+
+Two independent, policy-free mechanisms now live in `node_operations` and
+`graphiti_core/node_pre_resolution.py`, replacing the Graphiti-side mechanics of Menhir
+installer #16 (`_patch_graphiti_adaptive_dedupe`):
+
+Adaptive request bisection. `graphiti_core/errors.py` gains a public
+`GraphitiRequestTooLargeError` (a `GraphitiError` subclass). Phase D5 only *catches* it —
+making real OpenAI-compatible clients raise it is owned by Phase E. When
+`resolve_extracted_nodes`' single combined `_resolve_with_llm` call raises
+`GraphitiRequestTooLargeError`, the dedicated recursive helper
+`_resolve_unresolved_indices` bisects the unresolved index batch at its stable midpoint
+and resolves left then right recursively; each retry's dedupe candidate index is rebuilt
+only from the candidate pools of that subset (via `_merge_candidate_nodes`, preserving
+order and uuid-dedup semantics); a singleton batch that still raises propagates the
+exception unchanged. Semantic search, candidate filtering, and deterministic
+exact/similarity resolution are never rerun across splits — they complete exactly once
+before LLM escalation. Resolved nodes, uuid mappings, and duplicate pairs merge into the
+shared batch state (no duplicate promotions), and `identity_gate_hook` /
+`identity_gate_edges` are forwarded unchanged to every initial and retry LLM call, so
+identity-gate decisions and edge evidence survive every split. Without the exception,
+the ordinary one-request path is behavior-identical to the pre-D5 fork.
+
+Node pre-resolution seam. `NodePreResolutionHook` (see
+`graphiti_core/node_pre_resolution.py`) may be passed to `Graphiti(...)` at construction
+(class-level default included, so `__init__`-bypassing instances observe "no hook") and
+runs exactly once per extracted node *before* any semantic candidate search. It
+receives a frozen borrowed `NodePreResolutionContext` — the extracted `EntityNode`, the
+`GraphitiClients` bundle (driver/LLM/embedder access), the episode when bound, prior
+episodes, the entity-type map, and the request-local edge evidence when available — and
+must return a frozen `PreResolutionResult` carrying an explicit
+`PreResolutionDecision` plus a payload: `DEFER` requires `resolved_node=None` and leaves
+ordinary resolution untouched; `RESOLVE` requires `resolved_node` to be an `EntityNode`
+and marks the node pre-resolved, excluding it from candidate search, the candidate
+filter, deterministic similarity, and the dedupe LLM, committed to the final resolved
+state and uuid map exactly once, with a duplicate pair recorded exactly when the
+resolved UUID differs from the extracted UUID. Validation is strict: any other return
+type (including a bare `EntityNode`, which is NOT an implicit `RESOLVE`), any unknown
+decision, and any invalid decision/payload combination raise `TypeError`; hook
+exceptions propagate with no state to reset. Edge evidence for this hook travels a
+dedicated channel: `node_pre_resolution_edges` on `resolve_extracted_nodes`
+(episode-indexed `node_pre_resolution_edges` on `dedupe_nodes_bulk`), forwarded only
+when the pre-resolution hook is configured and never sourced from
+`identity_gate_edges`; the D2 `identity_gate_edges` channel remains independent.
+Ordinary nodes are searched once and realigned to original extracted-node order.
+
+Both mechanisms compose with the D2 identity gate and D3 candidate filter: the filter
+still runs once per unique merged candidate for non-pre-resolved nodes only, before
+deterministic/LLM resolution; pre-resolved nodes invoke neither the candidate filter nor
+the identity gate nor the dedupe LLM. The new `node_pre_resolution_hook` kwarg is
+forwarded from `Graphiti` at every `resolve_extracted_nodes` path (`add_episode`,
+`_extract_and_resolve_nodes`, `_extract_and_dedupe_nodes_bulk`/`dedupe_nodes_bulk`,
+`_resolve_nodes_and_edges_bulk`, `add_triplet`) and through `dedupe_nodes_bulk`'s first
+pass only when configured — with no hook, every call path keeps the exact legacy
+positional/keyword shape (kwarg omitted, never `None`), and identity edge evidence is
+still forwarded only with the identity hook. Both mechanisms are generic and carry no
+Menhir canonical-self identity, UUID/namespace derivation, receipts, mode selection,
+telemetry/prompt measurement, or candidate predicates: Menhir's canonical-self
+pre-resolution policy and installer-#16 patch removal are wired/removed in Phase F; the
+exception-raising side is Phase E.
 
 ## Fork / Upstream Topology
 

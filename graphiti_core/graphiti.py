@@ -58,6 +58,7 @@ from graphiti_core.helpers import (
 from graphiti_core.identity_gate import IdentityGateHook
 from graphiti_core.llm_client import LLMClient, OpenAIClient
 from graphiti_core.namespaces import EdgeNamespace, NodeNamespace
+from graphiti_core.node_pre_resolution import NodePreResolutionHook
 from graphiti_core.nodes import (
     CommunityNode,
     EntityNode,
@@ -151,6 +152,7 @@ class Graphiti:
     # keep the legacy no-hook resolver signature; __init__ overrides per instance.
     identity_gate_hook: IdentityGateHook | None = None
     candidate_filter_hook: CandidateFilterHook | None = None
+    node_pre_resolution_hook: NodePreResolutionHook | None = None
 
     def __init__(
         self,
@@ -168,6 +170,7 @@ class Graphiti:
         single_episode_extraction_hook: SingleEpisodeExtractionHook | None = None,
         identity_gate_hook: IdentityGateHook | None = None,
         candidate_filter_hook: CandidateFilterHook | None = None,
+        node_pre_resolution_hook: NodePreResolutionHook | None = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -225,6 +228,14 @@ class Graphiti:
             See :mod:`graphiti_core.candidate_filter`. When absent, Graphiti
             uses its unfiltered candidate pool; excluded candidates can never
             be resolved to for that extracted node.
+        node_pre_resolution_hook : NodePreResolutionHook | None, optional
+            Optional extension hook invoked exactly once per extracted node
+            before semantic candidate search, allowing the caller to defer
+            (ordinary resolution) or supply the fully resolved node. See
+            :mod:`graphiti_core.node_pre_resolution`. Pre-resolved nodes are
+            excluded from candidate search, candidate filtering, deterministic
+            similarity, and the dedupe LLM. When absent, Graphiti uses its
+            ordinary resolution path unchanged.
 
         Returns
         -------
@@ -293,6 +304,9 @@ class Graphiti:
 
         # Optional candidate-filter extension hook for dedupe candidate pools (neutral; no policy)
         self.candidate_filter_hook = candidate_filter_hook
+
+        # Optional node pre-resolution extension hook ahead of dedupe search (neutral; no policy)
+        self.node_pre_resolution_hook = node_pre_resolution_hook
 
         # Capture telemetry event
         self._capture_initialization_telemetry()
@@ -750,6 +764,8 @@ class Graphiti:
             identity_kwargs['identity_gate_hook'] = self.identity_gate_hook
         if self.candidate_filter_hook is not None:
             identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
+        if self.node_pre_resolution_hook is not None:
+            identity_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
 
         nodes, uuid_map, duplicates = await resolve_extracted_nodes(
             self.clients,
@@ -961,6 +977,9 @@ class Graphiti:
             dedupe_kwargs['extracted_edges'] = extracted_edges_bulk
         if self.candidate_filter_hook is not None:
             dedupe_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
+        if self.node_pre_resolution_hook is not None:
+            dedupe_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
+            dedupe_kwargs['node_pre_resolution_edges'] = extracted_edges_bulk
         nodes_by_episode, uuid_map = await dedupe_nodes_bulk(
             self.clients, extracted_nodes_bulk, episode_context, entity_types, **dedupe_kwargs
         )
@@ -1002,6 +1021,9 @@ class Graphiti:
                 kwargs['identity_gate_edges'] = edges
             if self.candidate_filter_hook is not None:
                 kwargs['candidate_filter_hook'] = self.candidate_filter_hook
+            if self.node_pre_resolution_hook is not None:
+                kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
+                kwargs['node_pre_resolution_edges'] = edges
             return kwargs
 
         # Resolve nodes
@@ -1320,6 +1342,9 @@ class Graphiti:
                     identity_kwargs['identity_gate_edges'] = precomputed_edges
                 if self.candidate_filter_hook is not None:
                     identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
+                if self.node_pre_resolution_hook is not None:
+                    identity_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
+                    identity_kwargs['node_pre_resolution_edges'] = precomputed_edges
                 nodes, uuid_map, _ = await resolve_extracted_nodes(
                     self.clients,
                     extracted_nodes,
@@ -1859,6 +1884,8 @@ class Graphiti:
             identity_kwargs['identity_gate_hook'] = self.identity_gate_hook
         if self.candidate_filter_hook is not None:
             identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
+        if self.node_pre_resolution_hook is not None:
+            identity_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
         try:
             resolved_source = await EntityNode.get_by_uuid(self.driver, source_node.uuid)
         except NodeNotFoundError:

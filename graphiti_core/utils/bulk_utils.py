@@ -42,6 +42,7 @@ from graphiti_core.models.nodes.node_db_queries import (
     get_entity_node_save_bulk_query,
     get_episode_node_save_bulk_query,
 )
+from graphiti_core.node_pre_resolution import NodePreResolutionHook
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from graphiti_core.utils.datetime_utils import convert_datetimes_to_strings
 from graphiti_core.utils.maintenance.dedup_helpers import (
@@ -381,6 +382,8 @@ async def dedupe_nodes_bulk(
     identity_gate_hook: IdentityGateHook | None = None,
     extracted_edges: list[list[EntityEdge]] | None = None,
     candidate_filter_hook: CandidateFilterHook | None = None,
+    node_pre_resolution_hook: NodePreResolutionHook | None = None,
+    node_pre_resolution_edges: list[list[EntityEdge]] | None = None,
 ) -> tuple[dict[str, list[EntityNode]], dict[str, str]]:
     """Resolve entity duplicates across an in-memory batch using a two-pass strategy.
 
@@ -396,7 +399,10 @@ async def dedupe_nodes_bulk(
     ``candidate_filter_hook`` is likewise passed through to the first pass so each
     episode's dedupe candidate pool is filtered before resolution. When no hook is
     configured, none of these kwargs are forwarded and the legacy resolver signature
-    is preserved exactly.
+    is preserved exactly. ``node_pre_resolution_hook`` is likewise passed through to
+    the first pass so it runs once per extracted node before candidate search, together
+    with ``node_pre_resolution_edges`` (episode-indexed edge evidence for the
+    pre-resolution channel only, independent of ``identity_gate_edges``/``extracted_edges``).
     """
 
     def _identity_kwargs(index: int) -> dict[str, Any]:
@@ -411,6 +417,13 @@ async def dedupe_nodes_bulk(
             kwargs['identity_gate_edges'] = edges
         if candidate_filter_hook is not None:
             kwargs['candidate_filter_hook'] = candidate_filter_hook
+        if node_pre_resolution_hook is not None:
+            kwargs['node_pre_resolution_hook'] = node_pre_resolution_hook
+            kwargs['node_pre_resolution_edges'] = (
+                node_pre_resolution_edges[index]
+                if node_pre_resolution_edges is not None and index < len(node_pre_resolution_edges)
+                else None
+            )
         return kwargs
 
     first_pass_results = await semaphore_gather(

@@ -1,5 +1,67 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase D5: adaptive dedupe request bisection + neutral node pre-resolution (fork mechanism half of installer #16)
+
+- `graphiti_core/errors.py`: NEW public `GraphitiRequestTooLargeError` (`GraphitiError`
+  subclass). D5 catches only this exception during node deduplication; Phase E owns
+  making real OpenAI-compatible clients raise it.
+- `graphiti_core/utils/maintenance/node_operations.py`: NEW recursive
+  `_resolve_unresolved_indices` helper. When the combined `_resolve_with_llm` call in
+  `resolve_extracted_nodes` raises `GraphitiRequestTooLargeError`, the unresolved index
+  batch bisects at its stable midpoint and resolves left then right recursively; each
+  retry's dedupe candidate index is rebuilt only from the candidate pools of that subset
+  (order-preserving, uuid-deduplicated); a singleton that still raises propagates
+  unchanged. Search, candidate filtering, and deterministic similarity run exactly once
+  before LLM escalation and are never rerun on split; resolved nodes, uuid maps, and
+  duplicate pairs merge without duplicate promotions; `identity_gate_hook` and
+  `identity_gate_edges` are forwarded unchanged to every initial and retry LLM call. The
+  no-error one-request path is behavior-identical.
+- `graphiti_core/node_pre_resolution.py`: NEW neutral typed pre-resolution hook module.
+  `NodePreResolutionHook` runs exactly once per extracted node before semantic candidate
+  search, receives a frozen borrowed `NodePreResolutionContext` (extracted node,
+  `GraphitiClients` access, episode, previous episodes, entity types, request-local edge
+  evidence when available), and must return a frozen `PreResolutionResult`: `DEFER`
+  (with `resolved_node=None`) leaves ordinary resolution; `RESOLVE` carries the fully
+  resolved `EntityNode`. Validation is strict — a bare `EntityNode`, any non-result
+  type, any unknown decision, or an invalid decision/payload combination (DEFER with a
+  node, RESOLVE without an EntityNode) raises `TypeError`; hook exceptions propagate.
+  Pre-resolved nodes are excluded from search, candidate filter, deterministic
+  similarity, and the dedupe LLM, committed to final state/uuid map exactly once, and
+  record a duplicate pair exactly when the resolved UUID differs; ordinary nodes are
+  searched once and realigned to original order. Edge evidence travels a dedicated
+  `node_pre_resolution_edges` channel (never `identity_gate_edges`), used only when the
+  hook is configured.
+- `graphiti_core/graphiti.py`: `Graphiti` gains an optional `node_pre_resolution_hook`
+  constructor parameter plus a class-level typed default (so `__init__`-bypassing
+  instances observe "no hook"), forwarded — together with the dedicated
+  `node_pre_resolution_edges` evidence channel — at every `resolve_extracted_nodes` call
+  path and to `dedupe_nodes_bulk` only when configured. No hook keeps the exact legacy
+  resolver shapes; `identity_gate_edges` remains an independent channel forwarded only
+  with the identity hook.
+- `graphiti_core/utils/bulk_utils.py`: `dedupe_nodes_bulk` gains matching optional
+  `node_pre_resolution_hook` and episode-indexed `node_pre_resolution_edges` pass-throughs
+  to its first-pass `resolve_extracted_nodes`.
+- `tests/test_node_pre_resolution.py`: NEW focused no-DB D5 suite: no-error single LLM
+  call; 4-way batch fail-then-stable-2+2; recursive 4→2→1 splitting; singleton rethrow
+  identity; subset candidate isolation/order; search/filter/deterministic exactly once
+  across splits; D2 identity hook + edge evidence preserved in split batches; hook
+  DEFER/RESOLVE result-object contract (strict validation, bare EntityNode rejected);
+  exception propagation; different-UUID duplicate bookkeeping; withholding from
+  search/filter/LLM; independent `node_pre_resolution_edges` channel vs
+  `identity_gate_edges`; constructor/class defaults; all
+  public/bulk wiring and legacy no-hook shapes; no Menhir imports/policy strings.
+  Verification: NOT RUN by the worker (Codex owns tests, static checks, git, grading,
+  and publication).
+- `.agent/architecture.md`: NEW "Adaptive Dedupe Request Bisection and Node
+  Pre-Resolution (native, fork half of installer #16)" section; generic
+  bisection/pre-resolution mechanisms are explicitly separated from Menhir
+  canonical-self/telemetry policy, with policy wiring plus installer removal deferred to
+  Phase F and exception-raising owned by Phase E.
+- Scope: installer #16 Graphiti-side mechanisms only. No Menhir predicates/names in
+  runtime code. Menhir canonical-self policy wiring and installer-#16 removal are Phase
+  F; raising `GraphitiRequestTooLargeError` from real OpenAI-compatible clients is
+  Phase E.
+
 ## 2026-09-14 — Phase D4: untyped attribute preservation in extraction (fork half of installer #15)
 
 - `graphiti_core/utils/maintenance/node_operations.py`: `_extract_entity_attributes` no longer
