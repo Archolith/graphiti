@@ -1,5 +1,30 @@
 # Changelog — graphiti
 
+## 2026-09-14 — Phase D4: untyped attribute preservation in extraction (fork half of installer #15)
+
+- `graphiti_core/utils/maintenance/node_operations.py`: `_extract_entity_attributes` no longer
+  returns `{}` when no typed attribute schema applies (`entity_type is None` or the schema has
+  no `model_fields`). It now returns a defensive shallow dict copy of `node.attributes`,
+  treating absent/falsy attributes as empty, with no LLM call in that path. Because
+  `extract_attributes_from_nodes` assigns the returned dict back to `node.attributes`,
+  pre-existing externally owned properties survive replacement-save persistence, and the
+  returned mapping never aliases the original. Typed-schema behavior is unchanged (context,
+  LLM call, capped overlay merge via `apply_capped_attributes`, shape validation, return).
+  This is the Graphiti-side *mechanism* replacement for Menhir installer #15
+  (`_patch_graphiti_untyped_attribute_preservation`, which wrapped `_extract_entity_attributes`);
+  Menhir-side patch removal is deferred to Phase F.
+- `tests/utils/maintenance/test_untyped_attribute_preservation.py`: NEW focused no-DB D4 suite
+  covering: entity_type=None preservation with no LLM call; distinct shallow copy (no aliasing,
+  caller mutation does not touch the node); empty-fields Pydantic model; empty/absent attributes;
+  the public `extract_attributes_from_nodes` path (typed + untyped nodes in one call); and
+  typed-schema LLM call with overlay semantics (LLM-omitted fields keep prior values).
+  Verification: NOT RUN by the worker (Codex owns tests, static checks, git, grading, and
+  publication).
+- `.agent/architecture.md`: NEW "Untyped Attribute Preservation in Attribute Extraction (fork
+  half of installer #15)" section.
+- Scope: installer #15 only. No Menhir predicates/names in runtime code; installers #16
+  (adaptive dedupe) and #17 remain out of scope. Menhir-side patch removal is Phase F.
+
 ## 2026-09-14 — Phase D3: native neutral candidate-filter hook for dedupe candidate pools (fork mechanism half of installer #14)
 
 - `graphiti_core/candidate_filter.py`: NEW neutral typed extension hook module.

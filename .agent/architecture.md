@@ -235,6 +235,21 @@ source policy — this replaces only the Graphiti-side *mechanism* of Menhir ins
 `node_operations._collect_candidate_nodes`); Menhir's structural/View predicate
 remains outside the fork and is wired on top of this hook during Phase F.
 
+## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
+
+`node_operations._extract_entity_attributes` is the single boundary where node attributes
+are replaced during extraction. When no typed attribute schema applies — `entity_type is None`
+or the schema has no `model_fields` — the function now returns a defensive shallow copy of
+`node.attributes` (absent/falsy attributes are treated as empty) instead of `{}`. No LLM call
+is made in this path. `extract_attributes_from_nodes` assigns that returned dict back to
+`node.attributes`, so externally owned pre-existing properties survive replacement-save
+persistence, and the returned mapping never aliases the original node attribute dict.
+Typed-schema behavior is unchanged: episode context build, LLM call, capped overlay merge
+(`apply_capped_attributes`), shape validation, and return. This is generic and policy-free
+(no Menhir predicates or names in runtime code); it replaces the Graphiti-side *mechanism* of
+Menhir installer #15 (`_patch_graphiti_untyped_attribute_preservation`, which wrapped
+`_extract_entity_attributes`). Menhir-side patch removal is deferred to Phase F.
+
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.
