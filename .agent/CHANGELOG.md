@@ -1,5 +1,20 @@
 # Changelog — graphiti
 
+## 2026-09-26 — Reconcile maintenance fork with stable Graphiti 0.30.2
+
+- Merge upstream v0.30.2 (`eaa4128681bc53487138a4bbc22d58336ebe70d2`) into
+  `menhir/0.30.2`, preserving the existing native extraction, identity, candidate,
+  pre-resolution and OpenAI request-guard changes.
+- `graphiti_core/graphiti.py`: carry request-scoped clients through fork extraction
+  routes and bulk deduplication; preserve upstream concurrency/database routing.
+- Routing and hook tests: adapt persistence fakes to the upstream client argument;
+  exercise non-default database extraction through persistence and interleaved hooks.
+- `.github/workflows/menhir-compatibility.yml`: service-free compatibility and build
+  gate for maintenance branches using hosted runners.
+- README, architecture and conventions: update the maintained upstream baseline.
+- Local verification: 366 focused fork/upstream regression tests passed; scoped
+  Pyright passed. Live graph/model quality is not established by this check.
+
 ## 2026-09-14 — Phase E: OpenAI-compatible request guard + context-length normalization (fork mechanism half of installer #17)
 
 - `graphiti_core/llm_client/request_guard.py`: NEW generic, policy-free request-guard

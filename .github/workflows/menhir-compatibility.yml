@@ -1,0 +1,49 @@
+name: Menhir compatibility
+
+on:
+  push:
+    branches: ['menhir/**']
+  pull_request:
+    branches: ['menhir/**']
+
+permissions:
+  contents: read
+
+jobs:
+  fork-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GRAPHITI_TELEMETRY_ENABLED: 'false'
+      DISABLE_NEO4J: '1'
+      DISABLE_FALKORDB: '1'
+      DISABLE_KUZU: '1'
+      DISABLE_NEPTUNE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install library and test tools
+        run: python -m pip install -e . pytest pytest-asyncio pytest-timeout ruff pyright opentelemetry-sdk build
+      - name: Check reconciled routing
+        run: |
+          ruff check graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py tests/test_extraction_routing.py tests/test_candidate_filter.py tests/test_identity_gate.py tests/test_node_pre_resolution.py tests/test_request_scope_concurrency.py
+          pyright graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py
+      - name: Verify fork contracts and upstream changes without services
+        run: |
+          python -m pytest -q --timeout=60 \
+            tests/test_extraction_routing.py tests/test_candidate_filter.py \
+            tests/test_identity_gate.py tests/test_node_pre_resolution.py \
+            tests/test_request_scope_concurrency.py tests/driver/test_neo4j_driver_routing.py \
+            tests/utils/search/test_edge_cross_encoder_rrf_shortlist.py \
+            tests/utils/search/test_episode_mentions_reranker.py \
+            tests/llm_client/test_request_guard.py tests/llm_client/test_openai_generic_client_guard.py \
+            tests/test_combined_extraction_models.py tests/test_dedupe_nodes_prompt.py \
+            tests/test_entity_record_tolerance.py tests/test_model_none_hardening.py \
+            tests/test_prompt_json.py tests/test_response_model_normalization.py \
+            tests/test_structured_summary_prompts.py tests/utils/maintenance/test_untyped_attribute_preservation.py \
+            tests/test_saga_refetch_episode_uuids.py tests/test_handle_multiple_group_ids.py \
+            tests/utils/maintenance/test_node_operations.py
+      - name: Build distributable
+        run: python -m build

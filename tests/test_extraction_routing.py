@@ -406,7 +406,8 @@ async def test_separate_route_still_calls_extract_edges(monkeypatch):
     assert new_edges == [edge]
 
 
-async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch):
+@pytest.mark.parametrize('base_database', [GROUP_ID, 'another_database'])
+async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch, base_database):
     """Public add_episode wiring: combined route carries edges; extract_edges never runs."""
     node_a, node_b = _make_node('Alice'), _make_node('Bob')
     edge = _make_edge(node_a, node_b, 'Alice likes Bob')
@@ -414,6 +415,7 @@ async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch):
     calls = {'combined': 0, 'separate_nodes': 0, 'extract_edges': 0, 'precomputed': 0}
 
     async def fake_combined(clients, ep, previous_episodes, **kwargs):
+        assert clients.driver._database == GROUP_ID
         calls['combined'] += 1
         return [node_a, node_b], [edge], {node_a.uuid: [0], node_b.uuid: [0]}
 
@@ -426,6 +428,7 @@ async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch):
         raise AssertionError('extract_edges must not run on the combined route')
 
     async def fake_resolve_nodes(clients, extracted_nodes, ep, previous_episodes, entity_types):
+        assert clients.driver._database == GROUP_ID
         return [node_a, node_b], {}, []
 
     def fake_resolve_pointers(edges, uuid_map):
@@ -433,10 +436,12 @@ async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch):
         return edges
 
     async def fake_resolve_edges(clients, edges, ep, nodes, edge_types, edge_type_map):
+        assert clients.driver._database == GROUP_ID
         assert edges == [edge]
         return edges, [], list(edges)
 
     async def fake_extract_attributes(clients, nodes, ep, previous_episodes, entity_types, edges):
+        assert clients.driver._database == GROUP_ID
         return nodes
 
     monkeypatch.setattr(graphiti_module, 'extract_nodes_and_edges', fake_combined)
@@ -450,7 +455,10 @@ async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch):
 
     graphiti = _make_graphiti()
     graphiti.driver = Mock()
-    graphiti.driver._database = GROUP_ID
+    graphiti.driver._database = base_database
+    graphiti.driver.clone.side_effect = lambda database: Mock(_database=database)
+    graphiti.clients.driver = graphiti.driver
+    graphiti.clients.model_copy.side_effect = lambda update: Mock(**update)
 
     async def fake_retrieve_episodes(*args, **kwargs):
         return []
@@ -464,7 +472,9 @@ async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch):
         saga=None,
         saga_previous_episode_uuid=None,
         node_episode_index_map=None,
+        clients=None,
     ):
+        assert clients.driver._database == GROUP_ID
         assert entity_edges == [edge]
         return [], episode
 
@@ -494,6 +504,8 @@ async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch):
     }
     assert result.edges == [edge]
     assert result.nodes == [node_a, node_b]
+    assert graphiti.driver._database == base_database
+    assert graphiti.clients.driver is graphiti.driver
     span.add_attributes.assert_called_once()
     assert span.add_attributes.call_args[0][0]['extraction.route'] == 'combined'
 

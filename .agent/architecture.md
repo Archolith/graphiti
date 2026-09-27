@@ -6,8 +6,8 @@ Graphiti is a framework for building and querying temporal context graphs for AI
 episodes (messages, text, JSON) into a graph of entities, relations, and communities with temporal validity windows,
 then supports hybrid retrieval (semantic + keyword + graph traversal) without full recomputation.
 
-**Fork context:** this tree is the Archolith soft fork of upstream `getzep/graphiti`, baseline tag `v0.29.3`, exact
-commit `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`, branch `menhir/0.29.3`. `origin` is `Archolith/graphiti`; `upstream`
+**Fork context:** this tree is the Archolith soft fork of upstream `getzep/graphiti`, baseline tag `v0.30.2`, exact
+commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`, branch `menhir/0.30.2`. `origin` is `Archolith/graphiti`; `upstream`
 is `getzep/graphiti`. Semantic customization migration has begun (see `.agent/CHANGELOG.md`); Menhir's runtime
 patches remain installed until Phase F.
 
@@ -439,3 +439,12 @@ uses `demodemo`.
 - Graph databases: Neo4j 5.26+, FalkorDB, AWS Neptune Analytics; Kuzu is deprecated upstream and slated for removal.
 - LLM/embedding APIs: OpenAI (default), Azure OpenAI, Anthropic, Groq, Google Gemini, Voyage.
 - Search backends for hybrid fulltext: driver-provided (Neo4j, FalkorDB) or OpenSearch (Neptune/neo4j-opensearch extras).
+
+## Upstream 0.30.2 reconciliation
+
+The maintenance line merges the stable v0.30.2 release, retaining the fork hooks.
+Single-episode extraction (hook, combined and separate routes), edge resolution and
+bulk deduplication use the upstream request-scoped GraphitiClients bundle. Neither
+concurrent tenant changes nor extraction hooks mutate the shared instance driver.
+Upstream search reranking, Neo4j routing, saga refetch and untyped attribute fixes
+are preserved. The Menhir compatibility workflow tests the merged boundaries.

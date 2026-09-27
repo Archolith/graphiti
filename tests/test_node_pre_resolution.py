@@ -720,6 +720,7 @@ async def _run_add_episode_wiring(monkeypatch, graphiti: Graphiti) -> dict:
         saga=None,
         saga_previous_episode_uuid=None,
         node_episode_index_map=None,
+        clients=None,
     ):
         return [], episode
 
