@@ -2,6 +2,9 @@
 
 ## 2026-09-26 — Reconcile maintenance fork with stable Graphiti 0.30.2
 
+- `pyproject.toml`, `uv.lock`: declare the directly imported `httpx` dependency;
+  clean CI installs no longer obtain it transitively from newer OpenAI releases.
+
 - Merge upstream v0.30.2 (`eaa4128681bc53487138a4bbc22d58336ebe70d2`) into
   `menhir/0.30.2`, preserving the existing native extraction, identity, candidate,
   pre-resolution and OpenAI request-guard changes.
