@@ -1,5 +1,19 @@
 # Changelog — graphiti
 
+## 2026-09-27 — Publish the Archolith Graphiti 0.30.2 fork
+
+- Published `archolith-graphiti-core==0.30.2.post1` from merged fork commit
+  `dbb0e33fbf7fdfbbe66bd1de7e2942d2dc4198bd` and tag `v0.30.2.post1`.
+  The distribution keeps the `graphiti_core` import name and contains the
+  native Menhir hooks; its public wheel SHA-256 is
+  `a748f98e0b09d64ab1eb29bd3449f52b552250a31663e86c4d99dc51ddf991f0`.
+- Declared the wheel's package path explicitly, updated the root lock, and
+  verified package metadata and hook files in the OIDC publishing workflow.
+- Moved the fork's Socket Firewall check to available hosted runners and tested
+  the public no-key fallback while retaining keyed-path checks when a key exists.
+- Added a concise public `CHANGELOG.md` and linked it from the README after
+  publication. The already-published tag and wheel remain unchanged.
+
 ## 2026-09-26 — Reconcile maintenance fork with stable Graphiti 0.30.2
 
 - `pyproject.toml`, `uv.lock`: declare the directly imported `httpx` dependency;

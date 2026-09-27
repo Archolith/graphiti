@@ -43,6 +43,7 @@ Graphiti
 This repository is the **Archolith soft fork** of [getzep/graphiti](https://github.com/getzep/graphiti), maintained for
 Menhir. Its PyPI distribution is `archolith-graphiti-core` and its Python import remains `graphiti_core`.
 The upstream installation command below installs upstream Graphiti, not this fork.
+See the [Archolith fork changelog](CHANGELOG.md) for release-specific changes.
 
 To install the Archolith fork after publication, use
 `pip install archolith-graphiti-core==0.30.2.post1` (or add the same exact version
@@ -51,7 +52,7 @@ the `graphiti_core` import package.
 
 - **Purpose:** a maintenance line that tracks upstream Graphiti while carrying Menhir-specific policy divergences.
 - **Baseline:** upstream `getzep/graphiti` tag `v0.30.2` at exact commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`.
-- **Branch:** this isolated maintenance worktree carries the `menhir/0.30.2` branch.
+- **Release source:** tag `v0.30.2.post1` records the reviewed fork commit used for the public wheel.
 - **Remotes:** `origin` is `Archolith/graphiti` (the public fork); `upstream` is `getzep/graphiti`.
 - **Consumer pinning:** Menhir consumes an exact fork distribution version and verifies the PyPI artifact hash;
   each release is traced to a reviewed fork commit. Never consume a moving branch or tag.
