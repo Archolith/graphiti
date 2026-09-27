@@ -14,13 +14,13 @@ authoritative for Graphiti source and testing conventions; these docs add fork c
 ## Role
 
 This directory documents the Archolith soft fork of Graphiti (maintained for Menhir) at baseline upstream
-`getzep/graphiti` tag `v0.29.3`, exact commit `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`, on branch `menhir/0.29.3`.
+`getzep/graphiti` tag `v0.30.2`, exact commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`, on branch `menhir/0.30.2`.
 
 ## Fork Boundary
 
 - `origin` is `Archolith/graphiti` (public fork); `upstream` is `getzep/graphiti`.
 - Menhir consumes this fork by exact commit SHA only — never a moving branch or tag.
-- No semantic customization has migrated yet. Bootstrap state only.
+- Native extraction, resolution and request-guard hooks are implemented; Menhir consumes them through policy adapters.
 - Every fork customization commit must be labeled exactly one of: `upstream bug fix` | `Menhir policy divergence` |
   `provider compatibility` | `temporary workaround`.
 - Never blindly merge upstream `main` into the maintenance line; assess, cherry-pick or rebase in a separate worktree,
@@ -28,8 +28,7 @@ This directory documents the Archolith soft fork of Graphiti (maintained for Men
 
 ## Branch / Worktree Rule
 
-The canonical clone stays on `main`. This isolated maintenance worktree (`C:\Users\thron\IdeaProjects\.agent\worktrees\graphiti-menhir-0293`)
-carries the `menhir/0.29.3` branch. Do fork work only in such worktrees.
+The canonical clone stays on `main`. The isolated reconciliation checkout carries the `menhir/0.30.2` branch. Do fork work only in such worktrees.
 
 ## Structural Ingest Deferral
 

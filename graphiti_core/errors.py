@@ -59,6 +59,17 @@ class NodeNotFoundError(GraphitiError):
         super().__init__(self.message)
 
 
+class GraphitiRequestTooLargeError(GraphitiError):
+    """Raised when a single Graphiti LLM request exceeds the provider's size limits.
+
+    Graphiti's adaptive request bisection catches this exception during node
+    deduplication and recursively splits the affected request into smaller
+    halves. Callers should raise it from LLM clients when the provider rejects
+    a request for being too large (token or payload limits), not for other
+    failures such as rate limiting or transport errors.
+    """
+
+
 class SearchRerankerError(GraphitiError):
     """Raised when a node is not found."""
 

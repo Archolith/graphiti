@@ -12,7 +12,7 @@ jobs:
       contents: write
     environment:
       name: release
-      url: https://pypi.org/p/zep-cloud
+      url: https://pypi.org/p/archolith-graphiti-core
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Setup Socket Firewall wrapper
@@ -41,5 +41,34 @@ jobs:
           fi
       - name: Build project for distribution
         run: uv build
+      - name: Verify Archolith fork wheel
+        run: |
+          uv run python - <<'PY'
+          from email.parser import BytesParser
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one fork wheel, found {len(wheels)}")
+          with ZipFile(wheels[0]) as archive:
+              names = set(archive.namelist())
+              metadata_files = [name for name in names if name.endswith(".dist-info/METADATA")]
+              if len(metadata_files) != 1:
+                  raise SystemExit("fork wheel must contain one METADATA file")
+              metadata = BytesParser().parsebytes(archive.read(metadata_files[0]))
+              if (metadata["Name"], metadata["Version"]) != (
+                  "archolith-graphiti-core", "0.30.2.post1"
+              ):
+                  raise SystemExit("fork wheel name or version differs from reviewed release")
+              required_hooks = {
+                  "graphiti_core/candidate_filter.py",
+                  "graphiti_core/identity_gate.py",
+                  "graphiti_core/node_pre_resolution.py",
+                  "graphiti_core/llm_client/request_guard.py",
+              }
+              if not required_hooks.issubset(names):
+                  raise SystemExit("fork wheel is missing native Menhir hooks")
+          PY
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

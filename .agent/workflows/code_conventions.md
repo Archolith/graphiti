@@ -34,8 +34,8 @@
 
 ## Fork Rules
 
-- Branch: `menhir/0.29.3` in this isolated maintenance worktree; canonical clone stays on `main`.
-- Baseline: upstream `getzep/graphiti` tag `v0.29.3`, exact commit `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`.
+- Branch: `menhir/0.30.2` in this isolated maintenance worktree; canonical clone stays on `main`.
+- Baseline: upstream `getzep/graphiti` tag `v0.30.2`, exact commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`.
 - Never blindly merge upstream `main` into the maintenance line; cherry-pick/rebase deliberately in a separate
   worktree and pass gates before updating Menhir's pinned exact SHA.
 - Label every fork customization commit exactly one of: `upstream bug fix` | `Menhir policy divergence` |

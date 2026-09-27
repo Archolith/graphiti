@@ -23,6 +23,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 from typing_extensions import Any
 
+from graphiti_core.candidate_filter import CandidateFilterHook
 from graphiti_core.driver.driver import (
     GraphDriver,
     GraphDriverSession,
@@ -32,6 +33,7 @@ from graphiti_core.edges import Edge, EntityEdge, EpisodicEdge, create_entity_ed
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import normalize_l2, semaphore_gather
+from graphiti_core.identity_gate import IdentityGateHook
 from graphiti_core.models.edges.edge_db_queries import (
     get_entity_edge_save_bulk_query,
     get_episodic_edge_save_bulk_query,
@@ -40,6 +42,7 @@ from graphiti_core.models.nodes.node_db_queries import (
     get_entity_node_save_bulk_query,
     get_episode_node_save_bulk_query,
 )
+from graphiti_core.node_pre_resolution import NodePreResolutionHook
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from graphiti_core.utils.datetime_utils import convert_datetimes_to_strings
 from graphiti_core.utils.maintenance.dedup_helpers import (
@@ -376,6 +379,11 @@ async def dedupe_nodes_bulk(
     extracted_nodes: list[list[EntityNode]],
     episode_tuples: list[tuple[EpisodicNode, list[EpisodicNode]]],
     entity_types: dict[str, type[BaseModel]] | None = None,
+    identity_gate_hook: IdentityGateHook | None = None,
+    extracted_edges: list[list[EntityEdge]] | None = None,
+    candidate_filter_hook: CandidateFilterHook | None = None,
+    node_pre_resolution_hook: NodePreResolutionHook | None = None,
+    node_pre_resolution_edges: list[list[EntityEdge]] | None = None,
 ) -> tuple[dict[str, list[EntityNode]], dict[str, str]]:
     """Resolve entity duplicates across an in-memory batch using a two-pass strategy.
 
@@ -384,7 +392,39 @@ async def dedupe_nodes_bulk(
     2. Re-run the deterministic similarity heuristics across the union of resolved nodes to catch
        duplicates that only co-occur inside this batch, emitting a canonical UUID map that callers
        can apply to edges and persistence.
+
+    ``identity_gate_hook`` and ``extracted_edges`` (episode-indexed, aligned with
+    ``extracted_nodes``) are passed through to the first pass so the hook sees the
+    episode's already-extracted edge evidence as ordinary per-call arguments.
+    ``candidate_filter_hook`` is likewise passed through to the first pass so each
+    episode's dedupe candidate pool is filtered before resolution. When no hook is
+    configured, none of these kwargs are forwarded and the legacy resolver signature
+    is preserved exactly. ``node_pre_resolution_hook`` is likewise passed through to
+    the first pass so it runs once per extracted node before candidate search, together
+    with ``node_pre_resolution_edges`` (episode-indexed edge evidence for the
+    pre-resolution channel only, independent of ``identity_gate_edges``/``extracted_edges``).
     """
+
+    def _identity_kwargs(index: int) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if identity_gate_hook is not None:
+            edges = (
+                extracted_edges[index]
+                if extracted_edges is not None and index < len(extracted_edges)
+                else None
+            )
+            kwargs['identity_gate_hook'] = identity_gate_hook
+            kwargs['identity_gate_edges'] = edges
+        if candidate_filter_hook is not None:
+            kwargs['candidate_filter_hook'] = candidate_filter_hook
+        if node_pre_resolution_hook is not None:
+            kwargs['node_pre_resolution_hook'] = node_pre_resolution_hook
+            kwargs['node_pre_resolution_edges'] = (
+                node_pre_resolution_edges[index]
+                if node_pre_resolution_edges is not None and index < len(node_pre_resolution_edges)
+                else None
+            )
+        return kwargs
 
     first_pass_results = await semaphore_gather(
         *[
@@ -394,6 +434,7 @@ async def dedupe_nodes_bulk(
                 episode_tuples[i][0],
                 episode_tuples[i][1],
                 entity_types,
+                **_identity_kwargs(i),
             )
             for i, nodes in enumerate(extracted_nodes)
         ]

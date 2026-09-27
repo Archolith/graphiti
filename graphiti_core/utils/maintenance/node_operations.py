@@ -21,11 +21,29 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from graphiti_core.candidate_filter import (
+    CandidateFilterContext,
+    CandidateFilterDecision,
+    CandidateFilterHook,
+    evaluate_candidate_filter_decision,
+)
 from graphiti_core.edges import EntityEdge
+from graphiti_core.errors import GraphitiRequestTooLargeError
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import semaphore_gather
+from graphiti_core.identity_gate import (
+    IdentityGateContext,
+    IdentityGateDecision,
+    IdentityGateHook,
+    evaluate_identity_decision,
+)
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.config import ModelSize
+from graphiti_core.node_pre_resolution import (
+    NodePreResolutionContext,
+    NodePreResolutionHook,
+    evaluate_pre_resolution_result,
+)
 from graphiti_core.nodes import (
     EntityNode,
     EpisodeType,
@@ -415,6 +433,31 @@ async def _collect_candidate_nodes(
     return [_merge_candidate_nodes(result, existing_nodes_override) for result in search_results]
 
 
+async def _apply_candidate_filter(
+    candidate_filter_hook: CandidateFilterHook,
+    extracted_node: EntityNode,
+    candidates: list[EntityNode],
+) -> list[EntityNode]:
+    """Apply the caller's candidate-filter hook to one merged candidate list.
+
+    Runs exactly once per unique candidate (the input list is already
+    deduplicated by :func:`_merge_candidate_nodes`), preserves candidate
+    order, and removes candidates for which the hook returns ``EXCLUDE``.
+    The hook context is frozen but the node objects are borrowed (shared with
+    the in-flight call; read-only by contract).
+    """
+    filtered: list[EntityNode] = []
+    for candidate in candidates:
+        decision = evaluate_candidate_filter_decision(
+            await candidate_filter_hook.filter_candidate(
+                CandidateFilterContext(extracted_node=extracted_node, candidate_node=candidate)
+            )
+        )
+        if decision is CandidateFilterDecision.INCLUDE:
+            filtered.append(candidate)
+    return filtered
+
+
 async def _semantic_candidate_search(
     clients: GraphitiClients,
     extracted_nodes: list[EntityNode],
@@ -472,11 +515,18 @@ async def _resolve_with_llm(
     episode: EpisodicNode | None,
     previous_episodes: list[EpisodicNode] | None,
     entity_types: dict[str, type[BaseModel]] | None,
+    identity_gate_hook: IdentityGateHook | None = None,
+    identity_gate_edges: list[EntityEdge] | None = None,
 ) -> None:
     """Escalate unresolved nodes to the dedupe prompt so the LLM can select or reject duplicates.
 
     The guardrails below defensively ignore malformed or duplicate LLM responses so the
     ingestion workflow remains deterministic even when the model misbehaves.
+
+    When ``identity_gate_hook`` is provided, it is invoked exactly once for each valid
+    LLM-proposed merge, after normalized resolutions are available and before the
+    candidate is promoted or any resolved-state mutation happens. See
+    :mod:`graphiti_core.identity_gate`.
     """
     if not state.unresolved_indices:
         return
@@ -607,9 +657,28 @@ async def _resolve_with_llm(
         if duplicate_candidate_id < 0:
             resolved_node = extracted_node
         elif duplicate_candidate_id in candidates_by_id:
-            resolved_node = _promote_resolved_node(
-                extracted_node, candidates_by_id[duplicate_candidate_id]
-            )
+            candidate_node = candidates_by_id[duplicate_candidate_id]
+            if identity_gate_hook is not None:
+                decision = evaluate_identity_decision(
+                    await identity_gate_hook.evaluate_identity_gate(
+                        IdentityGateContext(
+                            extracted_node=extracted_node,
+                            candidate_node=candidate_node,
+                            candidate_id=duplicate_candidate_id,
+                            episode=episode,
+                            previous_episodes=(
+                                previous_episodes if previous_episodes is not None else []
+                            ),
+                            edges=(identity_gate_edges if identity_gate_edges is not None else []),
+                        )
+                    )
+                )
+                if decision is not IdentityGateDecision.ALLOW:
+                    resolved_node = extracted_node
+                else:
+                    resolved_node = _promote_resolved_node(extracted_node, candidate_node)
+            else:
+                resolved_node = _promote_resolved_node(extracted_node, candidate_node)
         else:
             logger.warning(
                 'Invalid duplicate_candidate_id %d for extracted node %s; treating as no duplicate.',
@@ -624,6 +693,112 @@ async def _resolve_with_llm(
             state.duplicate_pairs.append((extracted_node, resolved_node))
 
 
+async def _resolve_unresolved_indices(
+    llm_client: LLMClient,
+    extracted_nodes: list[EntityNode],
+    candidate_nodes_by_extracted: list[list[EntityNode]],
+    state: DedupResolutionState,
+    episode: EpisodicNode | None,
+    previous_episodes: list[EpisodicNode] | None,
+    entity_types: dict[str, type[BaseModel]] | None,
+    identity_gate_hook: IdentityGateHook | None,
+    identity_gate_edges: list[EntityEdge] | None,
+) -> None:
+    """Resolve the batch's current unresolved indices via the dedupe LLM.
+
+    On :class:`GraphitiRequestTooLargeError` the unresolved index subset is
+    bisected at its stable midpoint and each half is resolved recursively;
+    each retry's dedupe candidate index is rebuilt only from the candidate
+    pools belonging to that subset (order and dedup semantics preserved). If a
+    singleton subset still raises, the exception propagates unchanged.
+    Semantic search, candidate filtering, and deterministic similarity are
+    never rerun here — they completed before LLM escalation.
+    """
+    if not state.unresolved_indices:
+        return
+
+    llm_candidate_nodes = _merge_candidate_nodes(
+        [
+            candidate
+            for idx in state.unresolved_indices
+            for candidate in candidate_nodes_by_extracted[idx]
+        ],
+        None,
+    )
+    try:
+        await _resolve_with_llm(
+            llm_client,
+            extracted_nodes,
+            _build_candidate_indexes(llm_candidate_nodes),
+            state,
+            episode,
+            previous_episodes,
+            entity_types,
+            identity_gate_hook=identity_gate_hook,
+            identity_gate_edges=identity_gate_edges,
+        )
+    except GraphitiRequestTooLargeError:
+        if len(state.unresolved_indices) == 1:
+            raise
+        midpoint = len(state.unresolved_indices) // 2
+        for subset in (
+            state.unresolved_indices[:midpoint],
+            state.unresolved_indices[midpoint:],
+        ):
+            sub_state = DedupResolutionState(
+                resolved_nodes=state.resolved_nodes,
+                uuid_map=state.uuid_map,
+                unresolved_indices=list(subset),
+                duplicate_pairs=state.duplicate_pairs,
+            )
+            await _resolve_unresolved_indices(
+                llm_client,
+                extracted_nodes,
+                candidate_nodes_by_extracted,
+                sub_state,
+                episode,
+                previous_episodes,
+                entity_types,
+                identity_gate_hook,
+                identity_gate_edges,
+            )
+
+
+async def _pre_resolve_nodes(
+    node_pre_resolution_hook: NodePreResolutionHook,
+    clients: GraphitiClients,
+    extracted_nodes: list[EntityNode],
+    episode: EpisodicNode | None,
+    previous_episodes: list[EpisodicNode] | None,
+    entity_types: dict[str, type[BaseModel]] | None,
+    edges: list[EntityEdge] | None,
+) -> dict[int, EntityNode]:
+    """Run the pre-resolution hook once per extracted node before search.
+
+    Returns a mapping of extracted-node index to the caller-supplied resolved
+    node for indices that did not defer. The hook context is frozen but its
+    contents are borrowed (shared with the in-flight call; read-only by
+    contract). Invalid hook return shapes raise ``TypeError``; hook
+    exceptions propagate unchanged.
+    """
+    pre_resolved: dict[int, EntityNode] = {}
+    for idx, node in enumerate(extracted_nodes):
+        result = await node_pre_resolution_hook.pre_resolve_node(
+            NodePreResolutionContext(
+                extracted_node=node,
+                clients=clients,
+                episode=episode,
+                previous_episodes=(previous_episodes if previous_episodes is not None else []),
+                entity_types=entity_types,
+                edges=(edges if edges is not None else []),
+            )
+        )
+        resolved = evaluate_pre_resolution_result(result)
+        if resolved is not None:
+            pre_resolved[idx] = resolved
+    return pre_resolved
+
+
 async def resolve_extracted_nodes(
     clients: GraphitiClients,
     extracted_nodes: list[EntityNode],
@@ -631,20 +806,106 @@ async def resolve_extracted_nodes(
     previous_episodes: list[EpisodicNode] | None = None,
     entity_types: dict[str, type[BaseModel]] | None = None,
     existing_nodes_override: list[EntityNode] | None = None,
+    identity_gate_hook: IdentityGateHook | None = None,
+    identity_gate_edges: list[EntityEdge] | None = None,
+    candidate_filter_hook: CandidateFilterHook | None = None,
+    node_pre_resolution_hook: NodePreResolutionHook | None = None,
+    node_pre_resolution_edges: list[EntityEdge] | None = None,
 ) -> tuple[list[EntityNode], dict[str, str], list[tuple[EntityNode, EntityNode]]]:
-    """Resolve nodes with semantic retrieval first, then deterministic and LLM dedup."""
+    """Resolve nodes with semantic retrieval first, then deterministic and LLM dedup.
+
+    When ``identity_gate_hook`` is provided, it gates each valid LLM-proposed merge
+    (see :mod:`graphiti_core.identity_gate`); ``identity_gate_edges`` carries the
+    request-local extracted/precomputed edge evidence exposed to the hook as an
+    ordinary argument. When the hook is absent, behavior is unchanged.
+
+    When ``candidate_filter_hook`` is provided, it is invoked exactly once per
+    unique merged candidate per extracted node — after semantic search results
+    and ``existing_nodes_override`` have been merged and deduplicated, before
+    deterministic exact/fuzzy handling or LLM candidate indexing (see
+    :mod:`graphiti_core.candidate_filter`). ``EXCLUDE`` removes the candidate
+    from that extracted node's pool; when all candidates are excluded, the
+    extracted node keeps Graphiti's ordinary no-candidate behavior (kept as a
+    new node) and neither the dedupe LLM nor the identity gate runs for it.
+    When the hook is absent, behavior is unchanged.
+
+    When ``node_pre_resolution_hook`` is provided, it is invoked exactly once
+    per extracted node before any semantic candidate search (see
+    :mod:`graphiti_core.node_pre_resolution`). It must return a
+    ``PreResolutionResult``: ``DEFER`` (with ``resolved_node=None``) leaves
+    ordinary resolution; ``RESOLVE`` carries the resolved ``EntityNode``,
+    which marks the node pre-resolved: it is excluded from candidate
+    search, candidate filtering, deterministic similarity, and the dedupe
+    LLM, and is committed to the final resolved state, uuid map, and
+    duplicate bookkeeping exactly once (a duplicate pair is recorded when the
+    resolved UUID differs from the extracted UUID). Any other return type or
+    invalid decision/payload combination raises ``TypeError``. The hook
+    context's edge evidence comes exclusively from
+    ``node_pre_resolution_edges`` — never from ``identity_gate_edges`` — and
+    ``node_pre_resolution_edges`` is used only when the hook is configured.
+    When the hook is absent, behavior is unchanged.
+
+    When the dedupe LLM request raises
+    :class:`~graphiti_core.errors.GraphitiRequestTooLargeError`, the
+    unresolved index batch is bisected at its stable midpoint and each half is
+    resolved recursively. Each retry's candidate index is rebuilt only from
+    the candidate pools of that subset; candidate order and dedup semantics
+    are preserved; identity-gate configuration is forwarded to every LLM
+    call. Semantic search, candidate filtering, and deterministic similarity
+    run exactly once before LLM escalation and are never rerun on split. If a
+    singleton batch still raises, the exception propagates unchanged. Without
+    the exception, the ordinary one-request path is behavior-identical.
+    """
     llm_client = clients.llm_client
-    candidate_nodes_by_extracted = await _collect_candidate_nodes(
-        clients,
-        extracted_nodes,
-        existing_nodes_override,
-    )
+
+    edges = node_pre_resolution_edges if node_pre_resolution_edges is not None else []
+    pre_resolved: dict[int, EntityNode] = {}
+    if node_pre_resolution_hook is not None:
+        pre_resolved = await _pre_resolve_nodes(
+            node_pre_resolution_hook,
+            clients,
+            extracted_nodes,
+            episode,
+            previous_episodes,
+            entity_types,
+            edges,
+        )
 
     state = DedupResolutionState(
         resolved_nodes=[None] * len(extracted_nodes),
         uuid_map={},
         unresolved_indices=[],
     )
+
+    for idx, resolved in pre_resolved.items():
+        extracted_node = extracted_nodes[idx]
+        state.resolved_nodes[idx] = resolved
+        state.uuid_map[extracted_node.uuid] = resolved.uuid
+        if resolved.uuid != extracted_node.uuid:
+            state.duplicate_pairs.append((extracted_node, resolved))
+
+    # Only ordinary (non-pre-resolved) nodes are searched; results are
+    # realigned to original extracted-node order with empty pools for
+    # pre-resolved indices.
+    ordinary_nodes = [node for idx, node in enumerate(extracted_nodes) if idx not in pre_resolved]
+    searched_pools = (
+        await _collect_candidate_nodes(
+            clients,
+            ordinary_nodes,
+            existing_nodes_override,
+        )
+        if ordinary_nodes
+        else []
+    )
+    searched_iter = iter(searched_pools)
+    candidate_nodes_by_extracted: list[list[EntityNode]] = [
+        [] if idx in pre_resolved else next(searched_iter) for idx in range(len(extracted_nodes))
+    ]
+    if candidate_filter_hook is not None:
+        candidate_nodes_by_extracted = [
+            await _apply_candidate_filter(candidate_filter_hook, node, candidates)
+            for node, candidates in zip(extracted_nodes, candidate_nodes_by_extracted, strict=True)
+        ]
 
     for idx, (node, candidates) in enumerate(
         zip(extracted_nodes, candidate_nodes_by_extracted, strict=True)
@@ -670,22 +931,16 @@ async def resolve_extracted_nodes(
         state.unresolved_indices.append(idx)
 
     if state.unresolved_indices:
-        llm_candidate_nodes = _merge_candidate_nodes(
-            [
-                candidate
-                for idx in state.unresolved_indices
-                for candidate in candidate_nodes_by_extracted[idx]
-            ],
-            None,
-        )
-        await _resolve_with_llm(
+        await _resolve_unresolved_indices(
             llm_client,
             extracted_nodes,
-            _build_candidate_indexes(llm_candidate_nodes),
+            candidate_nodes_by_extracted,
             state,
             episode,
             previous_episodes,
             entity_types,
+            identity_gate_hook,
+            identity_gate_edges,
         )
 
     if not state.unresolved_indices and not any(candidate_nodes_by_extracted):
@@ -788,7 +1043,10 @@ async def _extract_entity_attributes(
     entity_type: type[BaseModel] | None,
 ) -> dict[str, Any]:
     if entity_type is None or len(entity_type.model_fields) == 0:
-        return {}
+        # No typed schema: preserve any pre-existing attributes rather than
+        # clobbering them. Return a defensive shallow copy so callers assigning
+        # this result back cannot alias the original mapping.
+        return dict(node.attributes or {})
 
     attributes_context = _build_episode_context(
         # should not include summary
