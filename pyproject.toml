@@ -1,7 +1,7 @@
 [project]
-name = "graphiti-core"
+name = "archolith-graphiti-core"
 description = "A temporal graph building library"
-version = "0.30.2"
+version = "0.30.2.post1"
 authors = [
     { name = "Paul Paliychuk", email = "paul@getzep.com" },
     { name = "Preston Rasmussen", email = "preston@getzep.com" },
@@ -22,8 +22,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://help.getzep.com/graphiti/graphiti/overview"
-Repository = "https://github.com/getzep/graphiti"
+Homepage = "https://github.com/Archolith/graphiti"
+Repository = "https://github.com/Archolith/graphiti"
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.49.0"]
@@ -69,6 +69,9 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["graphiti_core"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

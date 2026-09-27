@@ -41,13 +41,20 @@ Graphiti
 ## Archolith soft-fork maintenance
 
 This repository is the **Archolith soft fork** of [getzep/graphiti](https://github.com/getzep/graphiti), maintained for
-Menhir. All Graphiti content below is upstream documentation and remains accurate for this fork.
+Menhir. Its PyPI distribution is `archolith-graphiti-core` and its Python import remains `graphiti_core`.
+The upstream installation command below installs upstream Graphiti, not this fork.
+
+To install the Archolith fork after publication, use
+`pip install archolith-graphiti-core==0.30.2.post1` (or add the same exact version
+with `uv`). Do not install it alongside upstream `graphiti-core`: both provide
+the `graphiti_core` import package.
 
 - **Purpose:** a maintenance line that tracks upstream Graphiti while carrying Menhir-specific policy divergences.
 - **Baseline:** upstream `getzep/graphiti` tag `v0.30.2` at exact commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`.
 - **Branch:** this isolated maintenance worktree carries the `menhir/0.30.2` branch.
 - **Remotes:** `origin` is `Archolith/graphiti` (the public fork); `upstream` is `getzep/graphiti`.
-- **Consumer pinning:** Menhir consumes this fork by **exact commit SHA** — never a moving branch or tag.
+- **Consumer pinning:** Menhir consumes an exact fork distribution version and verifies the PyPI artifact hash;
+  each release is traced to a reviewed fork commit. Never consume a moving branch or tag.
 - **Migration status:** native extraction, resolution and request-guard hooks are implemented; Menhir integration is gated separately.
 
 ### Maintenance procedure
@@ -55,7 +62,7 @@ Menhir. All Graphiti content below is upstream documentation and remains accurat
 1. Fetch upstream (`git fetch upstream`).
 2. Assess incoming changes; apply them by deliberate cherry-pick or rebase **in a separate worktree**.
 3. Run equivalence, regression, and packaging gates before accepting anything.
-4. Update Menhir's pinned exact SHA only after gates pass.
+4. Publish a uniquely versioned fork wheel, then update Menhir's exact version and lock hashes only after gates pass.
 5. Never blindly merge upstream `main` into the maintenance line.
 
 Every fork customization commit must be labeled with exactly one of:
