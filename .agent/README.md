@@ -14,7 +14,7 @@ authoritative for Graphiti source and testing conventions; these docs add fork c
 ## Role
 
 This directory documents the Archolith soft fork of Graphiti (maintained for Menhir) at baseline upstream
-`getzep/graphiti` tag `v0.30.2`, exact commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`, on branch `menhir/0.30.2`.
+`getzep/graphiti` tag `v0.30.2`, exact commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`, on branch `menhir/main`.
 
 ## Fork Boundary
 
@@ -28,7 +28,9 @@ This directory documents the Archolith soft fork of Graphiti (maintained for Men
 
 ## Branch / Worktree Rule
 
-The canonical clone stays on `main`. The isolated reconciliation checkout carries the `menhir/0.30.2` branch. Do fork work only in such worktrees.
+The canonical clone stays on `main` (the upstream mirror). All fork work lands on the single long-lived branch
+`menhir/main`; releases are cut from it with `v*` tags. The former `menhir/0.29.3` and `menhir/0.30.2` lines were
+consolidated into `menhir/main` on 2026-09-30. Do fork work only in isolated worktrees branched from `menhir/main`.
 
 ## Structural Ingest Deferral
 

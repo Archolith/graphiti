@@ -57,6 +57,7 @@ from graphiti_core.prompts.extract_nodes import (
     ExtractedEntity,
     SummarizedEntities,
 )
+from graphiti_core.prompts.prompt_helpers import without_merge_lineage
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.search.search_utils import node_similarity_search
 from graphiti_core.utils.datetime_utils import utc_now
@@ -1053,7 +1054,7 @@ async def _extract_entity_attributes(
         node_data={
             'name': node.name,
             'entity_types': node.labels,
-            'attributes': node.attributes,
+            'attributes': without_merge_lineage(node.attributes),
         },
         episode=episode,
         previous_episodes=previous_episodes,

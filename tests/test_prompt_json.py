@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from graphiti_core.prompts.prompt_helpers import to_prompt_json
+from graphiti_core.prompts.prompt_helpers import to_prompt_json, without_merge_lineage
 
 
 def test_baseline_json_behavior():
@@ -161,3 +161,31 @@ def test_conversion_method_exception_propagates():
 
     with pytest.raises(ValueError, match='malformed conversion'):
         to_prompt_json({'v': Exploding()})
+
+
+def test_merge_lineage_keys_removed_at_any_depth():
+    data = {
+        'name': 'Alice',
+        'merge_audit': ['{"absorbed_uuid": "a"}'],
+        'merged_from': ['a'],
+        'last_merge_op_id': 'op-1',
+        'attributes': {'merge_audit': ['x'], 'role': 'engineer'},
+        'candidates': [{'candidate_id': 0, 'merged_from': ['b'], 'summary': 's'}],
+    }
+    original = json.loads(json.dumps(data))
+
+    result = json.loads(to_prompt_json(data))
+
+    assert result == {
+        'name': 'Alice',
+        'attributes': {'role': 'engineer'},
+        'candidates': [{'candidate_id': 0, 'summary': 's'}],
+    }
+    assert data == original  # input not mutated
+
+
+def test_without_merge_lineage_copies_and_keeps_other_keys():
+    attributes = {'merge_audit': ['x'], 'merged_from': ['a'], 'last_merge_op_id': 'op', 'role': 'r'}
+
+    assert without_merge_lineage(attributes) == {'role': 'r'}
+    assert 'merge_audit' in attributes

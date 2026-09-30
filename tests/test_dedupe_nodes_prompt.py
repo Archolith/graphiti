@@ -140,3 +140,56 @@ def test_prompts_do_not_mutate_context() -> None:
     assert node_context == node_context_before
     assert nodes_context == nodes_context_before
     assert list_context == list_context_before
+
+
+def test_dedupe_and_summary_prompts_exclude_merge_lineage():
+    from graphiti_core.prompts.extract_nodes import extract_summaries_batch
+
+    lineage = {
+        'merge_audit': ['{"absorbed_uuid": "a"}'],
+        'merged_from': ['a'],
+        'last_merge_op_id': 'op-1',
+    }
+    candidate = {
+        **lineage,
+        'edge_count': 4,
+        'candidate_id': 0,
+        'name': 'CYBERSYN',
+        'entity_types': ['Entity'],
+        'summary': 'schema',
+    }
+    dedupe = nodes(
+        {
+            'previous_episodes': [],
+            'episode_content': 'Step 3: inspected CYBERSYN',
+            'extracted_nodes': [
+                {
+                    'id': 0,
+                    'name': 'CYBERSYN schema',
+                    'entity_type': ['Entity'],
+                    'entity_type_description': 'Default Entity Type',
+                }
+            ],
+            'existing_nodes': [candidate],
+        }
+    )
+    summaries = extract_summaries_batch(
+        {
+            'previous_episodes': [],
+            'episode_content': 'Step 3: inspected CYBERSYN',
+            'entities': [
+                {
+                    'name': 'CYBERSYN',
+                    'summary': 'schema',
+                    'entity_types': ['Entity'],
+                    'attributes': lineage,
+                }
+            ],
+        }
+    )
+
+    for prompt in (dedupe, summaries):
+        text = ''.join(message.content for message in prompt)
+        assert not any(key in text for key in lineage)
+        assert 'CYBERSYN' in text
+    assert '"edge_count": 4' in ''.join(message.content for message in dedupe)
