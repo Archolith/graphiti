@@ -76,6 +76,14 @@ extraction. All prompt modules (and `search/search_helpers.py`) inherit this beh
 shared helper import — no runtime rebinding or patching of prompt modules is involved. This replaces
 Menhir runtime patch behavior (installer #3, `_patch_graphiti_prompt_json`) at the source level.
 
+The same boundary drops Menhir merge lineage: dict entries keyed `merge_audit`, `merged_from` or
+`last_merge_op_id` are omitted at any depth. Entity attributes reach the dedup context
+(`**candidate.attributes`) and the batch-summary context (`'attributes': node.attributes`) through
+`to_prompt_json`; the typed attribute-extraction context renders its node dict without it, so
+`node_operations._extract_entity_attributes` passes `without_merge_lineage(node.attributes)` there.
+Only the prompt omits lineage: the node's stored attributes, and the attributes merged back after
+extraction, keep it. This replaces Menhir's request-level filter (`_strip_merge_lineage`, Menhir #205).
+
 ## Structured Summary Policy
 
 `graphiti_core/prompts/summarize_nodes.py` implements the Menhir structured-summary policy natively in

@@ -143,3 +143,27 @@ async def test_typed_schema_overlay_keeps_fields_omitted_by_llm():
     # LLM response wins for extracted fields; prior values are retained otherwise.
     assert result == {'external_property': 'keep-me', 'favorite_food': 'sushi'}
     llm_generate.assert_awaited_once()
+
+
+async def test_typed_extraction_prompt_excludes_merge_lineage_but_node_keeps_it():
+    clients, llm_generate = _make_clients()
+    lineage = {
+        'merge_audit': ['{"absorbed_uuid": "a"}'],
+        'merged_from': ['a'],
+        'last_merge_op_id': 'op-1',
+    }
+    node = EntityNode(
+        name='Grace',
+        group_id='group',
+        labels=['Entity', 'Person'],
+        attributes={'favorite_food': 'ramen', **lineage},
+    )
+    llm_generate.return_value = {'favorite_food': 'sushi'}
+
+    result = await _extract_entity_attributes(clients.llm_client, node, None, None, PersonSchema)
+
+    prompt = ''.join(message.content for message in llm_generate.await_args.args[0])
+    assert not any(key in prompt for key in lineage)
+    assert 'ramen' in prompt
+    # Lineage is stored bookkeeping: it stays on the node, only the prompt omits it.
+    assert result == {'favorite_food': 'sushi', **lineage}

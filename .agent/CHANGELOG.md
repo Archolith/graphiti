@@ -1,5 +1,18 @@
 # Changelog — graphiti
 
+## 2026-09-30 — Keep Menhir merge lineage out of prompts
+
+- `graphiti_core/prompts/prompt_helpers.py`: `to_prompt_json` drops `merge_audit`, `merged_from`
+  and `last_merge_op_id` at any depth; new `without_merge_lineage()` for contexts rendered without it.
+  Entity attributes reach the dedup and batch-summary prompts through `to_prompt_json`, so the merge
+  audit trail rode along and grew with every merge (64% of the dedup candidate block in Menhir AMA
+  runs; one 131k-char prompt). Replaces Menhir's request-level filter from Menhir #205.
+- `graphiti_core/utils/maintenance/node_operations.py`: the typed attribute-extraction context uses
+  `without_merge_lineage(node.attributes)`; the node keeps its stored lineage.
+- Tests: `tests/test_prompt_json.py`, `tests/test_dedupe_nodes_prompt.py`,
+  `tests/utils/maintenance/test_untyped_attribute_preservation.py`.
+- `.agent/architecture.md`: document the lineage rule under Prompt JSON Serialization.
+
 ## 2026-09-27 — Publish the Archolith Graphiti 0.30.2 fork
 
 - Published `archolith-graphiti-core==0.30.2.post1` from merged fork commit

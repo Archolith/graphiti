@@ -22,6 +22,18 @@ DO_NOT_ESCAPE_UNICODE = '\nDo not escape unicode characters.\n'
 _EMBEDDING_KEY_SUFFIX = '_embedding'
 _MIN_VECTOR_LENGTH = 64
 _SAMPLED_HEAD_LENGTH = 8
+# Menhir merge bookkeeping stored as entity attributes. Node attributes are serialized into the
+# dedup, summary and attribute-extraction contexts, so without this the audit trail reaches the
+# model and grows with every merge.
+_MERGE_LINEAGE_KEYS = frozenset({'merge_audit', 'merged_from', 'last_merge_op_id'})
+
+
+def without_merge_lineage(attributes: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of an attributes dict without merge-lineage keys.
+
+    For prompt contexts that are not rendered through ``to_prompt_json``.
+    """
+    return {key: value for key, value in attributes.items() if key not in _MERGE_LINEAGE_KEYS}
 
 
 def _looks_like_embedding_vector(value: Any) -> bool:
@@ -74,14 +86,17 @@ def _normalize(value: Any) -> Any:
     """
     Recursively copy and normalize a value for prompt serialization.
 
-    Dict entries whose string key ends with ``_embedding`` or whose value
+    Dict entries whose string key ends with ``_embedding``, is a merge-lineage
+    key (``merge_audit``, ``merged_from``, ``last_merge_op_id``), or whose value
     structurally looks like an embedding vector are omitted. Nested lists and
     tuples are copied recursively. The caller's input is never mutated.
     """
     if isinstance(value, dict):
         normalized: dict[Any, Any] = {}
         for key, item in value.items():
-            if isinstance(key, str) and key.endswith(_EMBEDDING_KEY_SUFFIX):
+            if isinstance(key, str) and (
+                key.endswith(_EMBEDDING_KEY_SUFFIX) or key in _MERGE_LINEAGE_KEYS
+            ):
                 continue
             if _looks_like_embedding_vector(item):
                 continue
@@ -109,7 +124,8 @@ def to_prompt_json(data: Any, ensure_ascii: bool = False, indent: int | None = N
         are preserved in their original form in the prompt, making them readable
         in LLM logs and improving model understanding.
 
-        Embedding vectors are removed before serialization so prompts stay small:
+        Embedding vectors and merge lineage (``merge_audit``, ``merged_from``,
+        ``last_merge_op_id``) are removed before serialization so prompts stay small:
         dict entries whose string key ends with ``_embedding`` are dropped, as are
         list/tuple values longer than 64 items whose first eight items are numbers
         (bool excluded). Temporal and other non-JSON-native values are converted
