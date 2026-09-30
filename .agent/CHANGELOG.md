@@ -1,5 +1,12 @@
 # Changelog — graphiti
 
+## 2026-09-30 — Consolidate fork maintenance on `menhir/main`
+
+- Created `menhir/main` at `64aaf6c` (the published `v0.30.2.post1` line) as the single long-lived fork
+  branch. `menhir/0.30.2` was fully contained in `menhir/0.29.3`; both old branches are retired.
+- `.agent/README.md`, `.agent/architecture.md`, `.agent/workflows/code_conventions.md`: name `menhir/main`
+  as the maintenance branch. Historical for-review records keep the branch names they were written on.
+
 ## 2026-09-30 — Keep Menhir merge lineage out of prompts
 
 - `graphiti_core/prompts/prompt_helpers.py`: `to_prompt_json` drops `merge_audit`, `merged_from`

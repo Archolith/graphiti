@@ -7,7 +7,7 @@ episodes (messages, text, JSON) into a graph of entities, relations, and communi
 then supports hybrid retrieval (semantic + keyword + graph traversal) without full recomputation.
 
 **Fork context:** this tree is the Archolith soft fork of upstream `getzep/graphiti`, baseline tag `v0.30.2`, exact
-commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`, branch `menhir/0.30.2`. `origin` is `Archolith/graphiti`; `upstream`
+commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`, branch `menhir/main`. `origin` is `Archolith/graphiti`; `upstream`
 is `getzep/graphiti`. Semantic customization migration has begun (see `.agent/CHANGELOG.md`); Menhir's runtime
 patches remain installed until Phase F.
 
@@ -410,8 +410,8 @@ remains Menhir-owned retry policy and is not ported.
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.
-- This maintenance worktree: branch `menhir/0.29.3`, based on upstream `v0.29.3`
-  (`021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`).
+- Maintenance branch: `menhir/main`, the single long-lived fork line (currently upstream `v0.30.2` plus fork
+  changes; it began at upstream `v0.29.3`, `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`). Releases are `v*` tags on it.
 - Upstream remote: `getzep/graphiti` (`upstream`).
 - Consumers pin exact fork commit SHAs; branches and tags are never used as consumption pins.
 - Upstream changes are applied via assessed cherry-pick/rebase in a separate worktree, gated, then the pinned SHA is
