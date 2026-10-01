@@ -1,5 +1,19 @@
 # Changelog — graphiti
 
+## 2026-09-30 — Make combined extraction prompt cacheable
+
+- `graphiti_core/prompts/extract_nodes_and_edges.py`: `extract_message` now puts all static
+  instruction text (persona, ENTITY RULES through `</NEGATIVE EXAMPLES>`, `<ENTITY TYPES>` and
+  `<FACT TYPES>` catalogs) in the system message and leaves only per-call content
+  (`<PREVIOUS MESSAGES>`, `<CURRENT MESSAGES>`, custom instructions) in the user message. The
+  union of instruction text is byte-identical to the previous single-user-prompt layout — only
+  the message split point moved. GPT-5.6+ models only reuse cached prefixes at message
+  boundaries; this yields ~98% cached input tokens (previously 0%).
+- `tests/test_extract_nodes_and_edges_prompt_cacheable.py`: NEW — pins the system/user split,
+  system-message stability across per-call content, and that the split reproduces the previous
+  prompt byte for byte (sha256 pins of the pre-split system and user messages).
+- `.agent/architecture.md`: documents the prompt-caching split in the combined-extraction section.
+
 ## 2026-09-30 — Consolidate fork maintenance on `menhir/main`
 
 - Created `menhir/main` at `64aaf6c` (the published `v0.30.2.post1` line) as the single long-lived fork

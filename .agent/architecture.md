@@ -138,6 +138,13 @@ through `resolve_extracted_edges` (which performs the downstream typed-attribute
 exists to keep custom-schema episodes on the exact pre-C1g upstream/installer path rather than to supply missing
 machinery. Bulk routing (`extract_nodes_and_edges_bulk`) is unchanged.
 
+Combined-extraction prompt caching: `graphiti_core/prompts/extract_nodes_and_edges.py::extract_message` splits its
+output across messages — the system message carries the static persona, all instruction blocks (ENTITY RULES through
+</NEGATIVE EXAMPLES>), and the <ENTITY TYPES>/<FACT TYPES> catalogs (byte-identical to the pre-split text); the user
+message carries only per-call content (<PREVIOUS MESSAGES>, <CURRENT MESSAGES>, custom instructions). This keeps the
+system prefix stable across calls for a deployment so GPT-5.6+ models — which only reuse cached prefixes at message
+boundaries — hit the prompt cache (measured 98% cached input tokens vs 0% with everything in the user message).
+
 Neutral extension hook: a `SingleEpisodeExtractionHook` (see `graphiti_core/extraction_routing.py`) may be passed
 to `Graphiti(...)` at construction. It is invoked once per `add_episode` call with a frozen
 `SingleEpisodeExtractionContext` — borrowed request-local inputs (clients, episode, previous episodes, type maps,
