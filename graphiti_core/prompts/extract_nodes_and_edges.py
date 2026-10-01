@@ -174,7 +174,12 @@ def extract_message(context: dict[str, Any]) -> list[Message]:
         'at retrieval time — only the entities and facts you extract will survive.'
     )
 
-    user_prompt = f"""
+    # GPT-5.6+ models only reuse cached prefixes at message boundaries: keep everything that is
+    # static for a deployment (instructions, entity/edge type catalogs) in the system message, and
+    # leave only per-call content (previous/current messages, custom instructions) in the user
+    # message so the system prefix hits the prompt cache.
+    system_prompt = f"""{sys_prompt}
+
 ENTITY RULES:
 1. Extract speakers and named entities explicitly mentioned in CURRENT MESSAGES.
 2. Entity names must be at most 5 words. Use the most specific form mentioned.
@@ -366,7 +371,9 @@ G) Direct speaker-to-target edges (no fragmenting through scenery)
 <ENTITY TYPES>
 {context['entity_types']}
 </ENTITY TYPES>
-{_build_edge_types_section(context.get('edge_types'))}
+{_build_edge_types_section(context.get('edge_types'))}"""
+
+    user_prompt = f"""
 <PREVIOUS MESSAGES>
 {to_prompt_json([ep for ep in context['previous_episodes']])}
 </PREVIOUS MESSAGES>
@@ -379,7 +386,7 @@ G) Direct speaker-to-target edges (no fragmenting through scenery)
 """
 
     return [
-        Message(role='system', content=sys_prompt),
+        Message(role='system', content=system_prompt),
         Message(role='user', content=user_prompt),
     ]
 
