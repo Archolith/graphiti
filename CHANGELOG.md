@@ -5,6 +5,25 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.30.2.post2 — 2026-10-01
+
+Maintenance release on the same upstream Graphiti 0.30.2 base.
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.30.2.post2) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.30.2.post2/)
+
+### Changed
+
+- The combined node/edge extraction prompt now places all static instruction text
+  (rules, examples, entity and fact type catalogs) in the system message and only
+  per-call content in the user message. The instruction text is byte-identical to
+  the previous layout; only the split point moved, so providers that cache at
+  message boundaries can reuse the static prefix
+  ([#3](https://github.com/Archolith/graphiti/pull/3)).
+- Menhir merge-lineage attributes (`merge_audit`, `merged_from`,
+  `last_merge_op_id`) are kept out of deduplication-candidate, batch-summary and
+  typed attribute-extraction prompts; stored node attributes are unchanged
+  ([#2](https://github.com/Archolith/graphiti/pull/2)).
+
 ## 0.30.2.post1 — 2026-09-27
 
 First public release of the Archolith fork, based on upstream Graphiti 0.30.2.

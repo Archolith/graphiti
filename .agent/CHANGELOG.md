@@ -1,5 +1,12 @@
 # Changelog — graphiti
 
+## 2026-10-01 — Release prep for `v0.30.2.post2`
+
+- `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
+  wheel version check), `README.md`, `CHANGELOG.md`: bump the published version to `0.30.2.post2`, which
+  carries #2 (merge lineage kept out of prompts) and #3 (cacheable combined extraction prompt) from
+  `menhir/main` @ `b408a3a`. Tag `v0.30.2.post2` on the merged release-prep commit triggers the PyPI release.
+
 ## 2026-09-30 — Make combined extraction prompt cacheable
 
 - `graphiti_core/prompts/extract_nodes_and_edges.py`: `extract_message` now puts all static
