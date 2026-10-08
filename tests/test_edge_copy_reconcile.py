@@ -173,6 +173,7 @@ def test_open_ended_copy_takes_the_contradiction_end():
 def test_attributes_come_from_the_resolved_copy(invalidated_first):
     resolved = _stored_copy()
     resolved.attributes = {}  # resolution recomputed (here: cleared) the attributes
+    resolved._attributes_resolved = True
     invalidated = [_stored_copy(), _stored_copy()]
     for edge in invalidated:
         edge.invalid_at, edge.expired_at = MILAN_START, FIXED_NOW
@@ -396,6 +397,7 @@ async def test_bulk_reconciles_copies_across_episodes(monkeypatch):
     live = _stored_copy()
     live.episodes.append('episode_1')
     live.attributes = {}
+    live._attributes_resolved = True
     expired = _stored_copy()
     expired.invalid_at, expired.expired_at = MILAN_START, FIXED_NOW
     per_episode = {'episode_1': ([live], [], []), 'episode_2': ([], [expired], [])}

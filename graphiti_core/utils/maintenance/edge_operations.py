@@ -496,6 +496,14 @@ async def resolve_extracted_edges(
 
         edge_types_lst.append(extracted_edge_types)
 
+    # A resolved-attributes mark must come from this resolution, not from an earlier one that
+    # handed back the same object (a driver or cache may reuse edge objects).
+    for edge in extracted_edges:
+        edge._attributes_resolved = False
+    for candidates in (*related_edges_lists, *edge_invalidation_candidates):
+        for edge in candidates:
+            edge._attributes_resolved = False
+
     # resolve edges with related edges in the graph and find invalidation candidates
     results: list[tuple[EntityEdge, list[EntityEdge], list[EntityEdge]]] = list(
         await semaphore_gather(
@@ -574,20 +582,20 @@ def reconcile_edge_copies(
     ``expired_at``, the earliest ``invalid_at`` (resolution only ever moves it earlier, so two
     copies that differ always differ by a truncation) and the union of ``episodes``, so any
     supersession found by one mention survives in any save order. ``attributes`` come from the
-    first resolved copy, whose attributes resolution recomputed; an invalidated copy carries
-    the attributes it was fetched with.
+    last copy whose attributes resolution recomputed or cleared (list order; across a bulk
+    batch, the later episode's list). A copy returned by the exact-fact fast path, or passed
+    only as an invalidation candidate, keeps the attributes it was fetched with, so it never
+    overrides a recomputed copy. When no copy was recomputed, attributes are left as they are.
 
     Copies always agree on group, endpoints and fact. A uuid group that does not is not copies
     of one edge; it is left untouched and logged.
     """
-    copies: dict[str, list[tuple[bool, EntityEdge]]] = {}
-    for is_resolved, edges in ((True, resolved_edges), (False, invalidated_edges)):
-        for edge in edges:
-            copies.setdefault(edge.uuid, []).append((is_resolved, edge))
-    for uuid, group in copies.items():
-        if len(group) < 2:
+    copies: dict[str, list[EntityEdge]] = {}
+    for edge in (*resolved_edges, *invalidated_edges):
+        copies.setdefault(edge.uuid, []).append(edge)
+    for uuid, edges in copies.items():
+        if len(edges) < 2:
             continue
-        edges = [edge for _, edge in group]
         if len({_copy_identity(edge) for edge in edges}) > 1:
             logger.warning('Edges sharing uuid %s are not copies of one edge; not reconciled', uuid)
             continue
@@ -598,8 +606,8 @@ def reconcile_edge_copies(
             for episode_uuid in edge.episodes:
                 if episode_uuid not in episodes:
                     episodes.append(episode_uuid)
-        resolved = [edge for is_resolved, edge in group if is_resolved]
-        attributes = resolved[0].attributes if resolved else None
+        recomputed = [edge for edge in edges if edge._attributes_resolved]
+        attributes = recomputed[-1].attributes if recomputed else None
         for edge in edges:
             edge.expired_at = expired_at
             edge.invalid_at = invalid_at
@@ -753,6 +761,7 @@ async def resolve_extracted_edge(
                 group_id=extracted_edge.group_id,
             )
             extracted_edge.attributes = merged
+            extracted_edge._attributes_resolved = True
 
         await _extract_edge_timestamps(llm_client, extracted_edge, episode)
 
@@ -884,6 +893,7 @@ async def resolve_extracted_edge(
         # No matching edge schema → no structured attributes apply; clear any stale
         # attributes left from a prior schema. Intentionally not merged.
         resolved_edge.attributes = {}
+    resolved_edge._attributes_resolved = True
 
     # Extract timestamps for new edges (duplicated edges retain their existing timestamps)
     if resolved_edge.uuid == extracted_edge.uuid:

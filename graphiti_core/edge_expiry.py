@@ -52,8 +52,8 @@ Copies: when several extracted edges resolve to the same stored edge, each call 
 own fetched copy, and the hook decides per copy. Before the save, ``reconcile_edge_copies``
 (in ``edge_operations``; called by ``resolve_extracted_edges`` and, across episodes, by
 ``add_episode_bulk``) gives every copy the earliest ``expired_at`` and ``invalid_at``, the
-union of ``episodes`` and the first resolved copy's ``attributes``. A ``WORLD_END`` answer for
-one copy therefore never overwrites a supersession found by another.
+union of ``episodes`` and the attributes of the last copy resolution recomputed. A
+``WORLD_END`` answer for one copy therefore never overwrites a supersession found by another.
 """
 
 from dataclasses import dataclass

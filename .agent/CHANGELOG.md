@@ -1,5 +1,21 @@
 # Changelog — graphiti
 
+## 2026-10-08 — Reconciled copies take recomputed attributes, not fast-path ones
+
+- `graphiti_core/edges.py`: `EntityEdge` gains the private, never-saved
+  `_attributes_resolved` mark.
+- `graphiti_core/utils/maintenance/edge_operations.py`: `resolve_extracted_edge` sets the mark
+  where it computes or clears attributes; `resolve_extracted_edges` resets it on the extracted
+  edges and every candidate before resolving; `reconcile_edge_copies` takes `attributes` from
+  the last marked copy and leaves attributes alone when none is marked. Previously it took the
+  first resolved copy's, and an exact-fact fast-path copy (stored attributes untouched) listed
+  first overwrote a paraphrase's recomputed or cleared attributes in every save order
+  (Codex review P3b-R2-1).
+- `tests/test_edge_copy_attributes.py`: NEW (exact + paraphrase in both orders, with and
+  without a schema; stale mark from a reused object; last-marked rule; mark never serialized);
+  added to `menhir-compatibility.yml`. `tests/test_edge_copy_reconcile.py`: the two hand-built
+  "recomputed" copies now set the mark (setup only, assertions unchanged).
+
 ## 2026-10-08 — Reconcile copies of one stored edge before the save
 
 - `graphiti_core/utils/maintenance/edge_operations.py`: NEW
