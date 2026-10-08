@@ -1157,7 +1157,7 @@ class Graphiti:
             # are extracted before edge resolution
 
         # Episodes resolve in parallel against their own copies of a stored edge; one save.
-        reconcile_edge_copies(resolved_edges + invalidated_edges)
+        reconcile_edge_copies(resolved_edges, invalidated_edges)
 
         return final_hydrated_nodes, resolved_edges, invalidated_edges, uuid_map
 

@@ -2,10 +2,12 @@
 
 ## 2026-10-08 — Reconcile copies of one stored edge before the save
 
-- `graphiti_core/utils/maintenance/edge_operations.py`: NEW `reconcile_edge_copies`; every
-  copy of a stored edge resolved by different mentions takes the earliest `expired_at`, the
-  earliest `invalid_at` and the union of `episodes`, in place, at the end of
-  `resolve_extracted_edges`. Previously the full-replace save let the last copy win, so a
+- `graphiti_core/utils/maintenance/edge_operations.py`: NEW
+  `reconcile_edge_copies(resolved_edges, invalidated_edges)`; every copy of a stored edge
+  resolved by different mentions takes the earliest `expired_at`, the earliest `invalid_at`,
+  the union of `episodes` and the first resolved copy's `attributes`, in place, at the end
+  of `resolve_extracted_edges`. Edges sharing a uuid but differing in group, endpoints or
+  fact are logged and left alone. Previously the full-replace save let the last copy win, so a
   live restatement could overwrite a supersession found by another mention (reachable with
   `WORLD_END`, and upstream for an open-ended edge invalidated by one mention and restated by
   another).

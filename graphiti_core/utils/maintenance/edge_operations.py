@@ -536,7 +536,7 @@ async def resolve_extracted_edges(
         if resolved_edge.uuid == extracted_edge.uuid:
             new_edges.append(resolved_edge)
 
-    reconcile_edge_copies(resolved_edges + invalidated_edges)
+    reconcile_edge_copies(resolved_edges, invalidated_edges)
 
     logger.debug(f'Resolved edges: {[e.uuid for e in resolved_edges]}')
     logger.debug(f'New edges (non-duplicates): {[e.uuid for e in new_edges]}')
@@ -559,32 +559,53 @@ def _earliest(values: list[datetime | None]) -> datetime | None:
     return earliest
 
 
-def reconcile_edge_copies(edges: list[EntityEdge]) -> None:
+def _copy_identity(edge: EntityEdge) -> tuple:
+    return edge.group_id, edge.source_node_uuid, edge.target_node_uuid, edge.fact
+
+
+def reconcile_edge_copies(
+    resolved_edges: list[EntityEdge], invalidated_edges: list[EntityEdge]
+) -> None:
     """Give every copy of the same stored edge one merged state, in place.
 
     Mentions resolve in parallel, each against its own fetched copy of a stored edge, and the
     save is a full replace per row, so the last copy saved would win. One copy can be expired
     by a contradiction while another stays live. Every copy instead takes the earliest
-    ``expired_at``, the earliest ``invalid_at`` (resolution only ever moves it earlier) and the
-    union of ``episodes``, so any supersession found by one mention survives in any save order.
+    ``expired_at``, the earliest ``invalid_at`` (resolution only ever moves it earlier, so two
+    copies that differ always differ by a truncation) and the union of ``episodes``, so any
+    supersession found by one mention survives in any save order. ``attributes`` come from the
+    first resolved copy, whose attributes resolution recomputed; an invalidated copy carries
+    the attributes it was fetched with.
+
+    Copies always agree on group, endpoints and fact. A uuid group that does not is not copies
+    of one edge; it is left untouched and logged.
     """
-    copies: dict[str, list[EntityEdge]] = {}
-    for edge in edges:
-        copies.setdefault(edge.uuid, []).append(edge)
-    for group in copies.values():
+    copies: dict[str, list[tuple[bool, EntityEdge]]] = {}
+    for is_resolved, edges in ((True, resolved_edges), (False, invalidated_edges)):
+        for edge in edges:
+            copies.setdefault(edge.uuid, []).append((is_resolved, edge))
+    for uuid, group in copies.items():
         if len(group) < 2:
             continue
-        expired_at = _earliest([edge.expired_at for edge in group])
-        invalid_at = _earliest([edge.invalid_at for edge in group])
+        edges = [edge for _, edge in group]
+        if len({_copy_identity(edge) for edge in edges}) > 1:
+            logger.warning('Edges sharing uuid %s are not copies of one edge; not reconciled', uuid)
+            continue
+        expired_at = _earliest([edge.expired_at for edge in edges])
+        invalid_at = _earliest([edge.invalid_at for edge in edges])
         episodes: list[str] = []
-        for edge in group:
+        for edge in edges:
             for episode_uuid in edge.episodes:
                 if episode_uuid not in episodes:
                     episodes.append(episode_uuid)
-        for edge in group:
+        resolved = [edge for is_resolved, edge in group if is_resolved]
+        attributes = resolved[0].attributes if resolved else None
+        for edge in edges:
             edge.expired_at = expired_at
             edge.invalid_at = invalid_at
             edge.episodes = list(episodes)
+            if attributes is not None:
+                edge.attributes = dict(attributes)
 
 
 def resolve_edge_contradictions(
