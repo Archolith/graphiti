@@ -15,6 +15,13 @@
   per-episode results before `add_episode_bulk` saves them.
 - `tests/test_edge_copy_reconcile.py`: NEW; added to `menhir-compatibility.yml`.
 
+## 2026-10-08 — Release prep for `v0.30.2.post4`
+
+- `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
+  wheel version check), `README.md`, `CHANGELOG.md`: bump the published version to `0.30.2.post4`, which carries
+  #7 (reconcile copies of one stored edge) from `menhir/main` @ `ee1e74b`. Tag `v0.30.2.post4` on the merged
+  release-prep commit triggers the PyPI release.
+
 ## 2026-10-08 — Release prep for `v0.30.2.post3`
 
 - `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed

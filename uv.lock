@@ -239,7 +239,7 @@ wheels = [
 
 [[package]]
 name = "archolith-graphiti-core"
-version = "0.30.2.post3"
+version = "0.30.2.post4"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
