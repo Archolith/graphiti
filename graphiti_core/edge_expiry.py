@@ -43,15 +43,17 @@ Effect of ``WORLD_END``:
 
 ``EXPIRE`` (and no hook) is upstream behavior.
 
-Known limitations:
+Known limitation: the decision applies to ``resolved_edge``. In ``dedupe_edges_bulk`` (bulk
+pass 1) the resolved edge may be another unsaved edge of the same batch, and an ``EXPIRE``
+written there is final, because later passes skip already-expired edges. A hook that keys its
+evidence by edge uuid should look up ``resolved_edge``, not only ``extracted_edge``.
 
-- the decision applies to ``resolved_edge``. In ``dedupe_edges_bulk`` (bulk pass 1) the
-  resolved edge may be another unsaved edge of the same batch, and an ``EXPIRE`` written
-  there is final, because later passes skip already-expired edges. A hook that keys its
-  evidence by edge uuid should look up ``resolved_edge``, not only ``extracted_edge``;
-- when two extracted edges of one batch resolve to the same stored edge, each call works on
-  its own copy, and the copies are persisted in batch order (last write wins). Under
-  ``WORLD_END`` the copies can differ, so a supersession found by one copy can be lost.
+Copies: when several extracted edges resolve to the same stored edge, each call works on its
+own fetched copy, and the hook decides per copy. Before the save, ``reconcile_edge_copies``
+(in ``edge_operations``; called by ``resolve_extracted_edges`` and, across episodes, by
+``add_episode_bulk``) gives every copy the earliest ``expired_at`` and ``invalid_at``, the
+union of ``episodes`` and the first resolved copy's ``attributes``. A ``WORLD_END`` answer for
+one copy therefore never overwrites a supersession found by another.
 """
 
 from dataclasses import dataclass

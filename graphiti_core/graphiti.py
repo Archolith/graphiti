@@ -104,6 +104,7 @@ from graphiti_core.utils.maintenance.community_operations import (
 from graphiti_core.utils.maintenance.edge_operations import (
     build_episodic_edges,
     extract_edges,
+    reconcile_edge_copies,
     resolve_extracted_edge,
     resolve_extracted_edges,
 )
@@ -1154,6 +1155,9 @@ class Graphiti:
             invalidated_edges.extend(result[1])
             # result[2] is new_edges - not used in bulk flow since attributes
             # are extracted before edge resolution
+
+        # Episodes resolve in parallel against their own copies of a stored edge; one save.
+        reconcile_edge_copies(resolved_edges, invalidated_edges)
 
         return final_hydrated_nodes, resolved_edges, invalidated_edges, uuid_map
 
