@@ -22,7 +22,7 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from typing_extensions import LiteralString
 
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
@@ -283,6 +283,10 @@ class EntityEdge(Edge):
     attributes: dict[str, Any] = Field(
         default={}, description='Additional attributes of the edge. Dependent on edge name'
     )
+    # In-memory only, never saved: set when edge resolution recomputed (or cleared) the
+    # attributes of this object. reconcile_edge_copies uses it to prefer those attributes
+    # over a copy that kept its fetched ones.
+    _attributes_resolved: bool = PrivateAttr(default=False)
 
     @model_validator(mode='before')
     @classmethod

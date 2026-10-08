@@ -288,12 +288,18 @@ The known limitation (bulk pass-1 in-batch duplicates) is listed in the module d
 Copies of one stored edge: mentions resolve in parallel, each against its own fetched copy,
 and the edge save is a full replace per row, so the last copy saved would win.
 `reconcile_edge_copies` gives every copy with the same uuid the earliest `expired_at`, the
-earliest `invalid_at`, the union of `episodes` and the first resolved copy's `attributes`
-(an invalidated copy carries the attributes it was fetched with), in place, at the end of
+earliest `invalid_at`, the union of `episodes` and the `attributes` of the last copy whose
+attributes resolution recomputed or cleared, in place, at the end of
 `resolve_extracted_edges` (`add_episode`) and where
 `_resolve_nodes_and_edges_bulk` combines episodes (`add_episode_bulk`). A supersession
 found by any mention therefore survives every save order, hook or not
-(`tests/test_edge_copy_reconcile.py`). A uuid group whose edges differ in group, endpoints
+(`tests/test_edge_copy_reconcile.py`). Which copies were recomputed is tracked by the
+in-memory, never-saved `EntityEdge._attributes_resolved` mark: `resolve_extracted_edge` sets it
+where it computes or clears attributes, and `resolve_extracted_edges` resets it on every
+candidate before resolving. A copy from the exact-fact fast path, or one that is only an
+invalidation candidate, keeps its fetched attributes and never overrides a recomputed copy;
+with no recomputed copy, attributes are left alone (`tests/test_edge_copy_attributes.py`).
+A uuid group whose edges differ in group, endpoints
 or fact is not copies of one edge; it is logged and left alone. `add_triplet` is not
 reconciled: an update by an existing uuid can meet its own stored copy among the
 invalidation candidates (upstream behavior, not changed here).
