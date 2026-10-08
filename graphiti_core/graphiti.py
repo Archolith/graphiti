@@ -30,6 +30,7 @@ from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerCli
 from graphiti_core.decorators import handle_multiple_group_ids
 from graphiti_core.driver.driver import GraphDriver
 from graphiti_core.driver.neo4j_driver import Neo4jDriver
+from graphiti_core.edge_expiry import EdgeExpiryHook, edge_expiry_kwargs
 from graphiti_core.edges import (
     CommunityEdge,
     Edge,
@@ -153,6 +154,7 @@ class Graphiti:
     identity_gate_hook: IdentityGateHook | None = None
     candidate_filter_hook: CandidateFilterHook | None = None
     node_pre_resolution_hook: NodePreResolutionHook | None = None
+    edge_expiry_hook: EdgeExpiryHook | None = None
 
     def __init__(
         self,
@@ -171,6 +173,7 @@ class Graphiti:
         identity_gate_hook: IdentityGateHook | None = None,
         candidate_filter_hook: CandidateFilterHook | None = None,
         node_pre_resolution_hook: NodePreResolutionHook | None = None,
+        edge_expiry_hook: EdgeExpiryHook | None = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -236,6 +239,11 @@ class Graphiti:
             excluded from candidate search, candidate filtering, deterministic
             similarity, and the dedupe LLM. When absent, Graphiti uses its
             ordinary resolution path unchanged.
+        edge_expiry_hook : EdgeExpiryHook | None, optional
+            Optional extension hook asked, for each resolved edge that carries its
+            own ``invalid_at``, whether that end expires the edge (upstream) or is
+            the fact's world-time end. See :mod:`graphiti_core.edge_expiry`. When
+            absent, edge expiry is unchanged.
 
         Returns
         -------
@@ -307,6 +315,9 @@ class Graphiti:
 
         # Optional node pre-resolution extension hook ahead of dedupe search (neutral; no policy)
         self.node_pre_resolution_hook = node_pre_resolution_hook
+
+        # Optional edge-expiry extension hook for an edge's own end (neutral; no policy)
+        self.edge_expiry_hook = edge_expiry_hook
 
         # Capture telemetry event
         self._capture_initialization_telemetry()
@@ -855,6 +866,7 @@ class Graphiti:
             nodes,
             edge_types or {},
             edge_type_map,
+            **edge_expiry_kwargs(self.edge_expiry_hook),
         )
 
         return resolved_edges, invalidated_edges, new_edges
@@ -1129,6 +1141,7 @@ class Graphiti:
                     final_hydrated_nodes,
                     edge_types or {},
                     edge_type_map,
+                    **edge_expiry_kwargs(self.edge_expiry_hook),
                 )
                 for episode in episodes
             ]
@@ -1656,6 +1669,7 @@ class Graphiti:
                     [],
                     edge_types or {},
                     edge_type_map or edge_type_map_default,
+                    **edge_expiry_kwargs(self.edge_expiry_hook),
                 )
 
                 # Resolve nodes and edges against the existing graph
@@ -2047,6 +2061,7 @@ class Graphiti:
                 group_id=edge.group_id,
             ),
             None,
+            **edge_expiry_kwargs(self.edge_expiry_hook),
         )
 
         edges: list[EntityEdge] = [resolved_edge] + invalidated_edges

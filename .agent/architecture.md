@@ -252,6 +252,40 @@ source policy — this replaces only the Graphiti-side *mechanism* of Menhir ins
 `node_operations._collect_candidate_nodes`); Menhir's structural/View predicate
 remains outside the fork and is wired on top of this hook during Phase F.
 
+## Edge-Expiry Hook for an Edge's Own End (native, fork; Menhir policy divergence)
+
+Upstream `edge_operations.resolve_extracted_edge` expires every resolved edge that carries
+its own `invalid_at` ("path 1"), even with no contradiction, so a finished trip or a past
+state reads as a superseded belief. An `EdgeExpiryHook` (see `graphiti_core/edge_expiry.py`)
+may be passed to `Graphiti(...)`. It is asked once per `resolve_extracted_edge` call that
+reaches the expiry step, only when the resolved edge (new, or the existing edge an extracted
+edge was resolved to as a duplicate) has `invalid_at` set and `expired_at` unset. The
+early-return (no candidates) and exact-fact fast paths never reach it.
+
+The hook gets a frozen `EdgeExpiryContext` (`extracted_edge`, `resolved_edge`,
+`is_duplicate`, `episode`; models borrowed, read-only by contract) and returns an
+`EdgeExpiryDecision`:
+
+- `EXPIRE`: upstream behavior (same as no hook).
+- `WORLD_END`: `invalid_at` is the fact's world-time end. Path 1 is skipped. Path 2 (a
+  contradicted candidate newer than the edge) gains an overlap rule: only a candidate whose
+  `valid_at` is strictly before the edge's `invalid_at` truncates `invalid_at` to the
+  candidate's `valid_at` and expires the edge; a candidate at or after the end is ignored.
+  With an undated start the window is open: an in-window contradiction expires the edge
+  with `invalid_at` kept (the upstream result). An inverted window (`invalid_at <=
+  valid_at`) is expired as upstream. Path 3 (`resolve_edge_contradictions`, older
+  contradicted edges) is unchanged.
+
+Any other return value raises `TypeError`; hook exceptions propagate and abort the call. No
+module-global state, `ContextVar` or cache. The hook is forwarded only when configured
+(`edge_expiry_kwargs`), so with no hook every call keeps the legacy shape: `add_episode`
+and `_resolve_nodes_and_edges_bulk` (`resolve_extracted_edges`), `add_episode_bulk`
+(`dedupe_edges_bulk`) and `add_triplet` (`resolve_extracted_edge`).
+`tests/test_edge_expiry.py` has a structural guard that every resolver call in
+`graphiti_core` threads it; `menhir-compatibility.yml` runs it on every `menhir/**` PR.
+Known limitations (bulk pass-1 in-batch duplicates; diverging copies of one stored edge
+in a batch) are listed in the module docstring.
+
 ## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
 
 `node_operations._extract_entity_attributes` is the single boundary where node attributes

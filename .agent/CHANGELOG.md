@@ -1,5 +1,20 @@
 # Changelog — graphiti
 
+## 2026-10-08 — Edge-expiry hook for an edge's own end (Menhir policy divergence)
+
+- `graphiti_core/edge_expiry.py`: NEW — `EdgeExpiryHook` protocol, `EdgeExpiryDecision`
+  (`EXPIRE`, `WORLD_END`), frozen `EdgeExpiryContext`, `evaluate_edge_expiry_decision`,
+  `edge_expiry_kwargs`.
+- `graphiti_core/utils/maintenance/edge_operations.py`: `resolve_extracted_edge(s)` take an
+  optional `edge_expiry_hook`; `WORLD_END` skips own-end expiry and adds the path-2 overlap
+  rule (only a contradiction inside the fact's window supersedes it). No hook / `EXPIRE` is
+  unchanged.
+- `graphiti_core/graphiti.py`, `graphiti_core/utils/bulk_utils.py`: `Graphiti(edge_expiry_hook=...)`
+  forwarded to every resolver call path only when configured.
+- `tests/test_edge_expiry.py`: NEW — upstream identity, WORLD_END on new and duplicate edges,
+  overlap rule, path 3 unchanged, invocation gates, invalid return / exception, call-site wiring.
+- `.agent/architecture.md`: new "Edge-Expiry Hook" section.
+
 ## 2026-10-01 — Release prep for `v0.30.2.post2`
 
 - `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
