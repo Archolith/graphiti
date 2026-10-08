@@ -5,6 +5,21 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.30.2.post4 — 2026-10-08
+
+Maintenance release on the same upstream Graphiti 0.30.2 base.
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.30.2.post4) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.30.2.post4/)
+
+### Fixed
+
+- When several extracted edges of one episode (or one bulk batch) resolve to the
+  same stored edge, every copy now saves with the earliest `expired_at` and
+  `invalid_at`, the merged episode list and the attributes resolution computed.
+  Previously the last copy saved won, so
+  a copy that restated the fact could overwrite a supersession another copy found
+  ([#7](https://github.com/Archolith/graphiti/pull/7)).
+
 ## 0.30.2.post3 — 2026-10-08
 
 Maintenance release on the same upstream Graphiti 0.30.2 base.
