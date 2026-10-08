@@ -5,6 +5,21 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.30.2.post3 — 2026-10-08
+
+Maintenance release on the same upstream Graphiti 0.30.2 base.
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.30.2.post3) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.30.2.post3/)
+
+### Changed
+
+- New optional `Graphiti(edge_expiry_hook=...)`. Without a hook, or when it answers
+  `EXPIRE`, edge expiry is unchanged. A hook that answers `WORLD_END` keeps an edge
+  whose own `invalid_at` is the fact's world-time end (a finished trip, a past state)
+  from being expired for that end alone; a contradiction that starts inside the
+  fact's window still supersedes it
+  ([#5](https://github.com/Archolith/graphiti/pull/5)).
+
 ## 0.30.2.post2 — 2026-10-01
 
 Maintenance release on the same upstream Graphiti 0.30.2 base.

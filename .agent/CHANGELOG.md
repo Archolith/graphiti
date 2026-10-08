@@ -1,5 +1,12 @@
 # Changelog — graphiti
 
+## 2026-10-08 — Release prep for `v0.30.2.post3`
+
+- `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
+  wheel version check; `graphiti_core/edge_expiry.py` added to the required hook files), `README.md`,
+  `CHANGELOG.md`: bump the published version to `0.30.2.post3`, which carries #5 (edge-expiry hook) from
+  `menhir/main` @ `201c934`. Tag `v0.30.2.post3` on the merged release-prep commit triggers the PyPI release.
+
 ## 2026-10-08 — Edge-expiry hook for an edge's own end (Menhir policy divergence)
 
 - `graphiti_core/edge_expiry.py`: NEW — `EdgeExpiryHook` protocol, `EdgeExpiryDecision`

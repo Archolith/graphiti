@@ -58,11 +58,12 @@ jobs:
                   raise SystemExit("fork wheel must contain one METADATA file")
               metadata = BytesParser().parsebytes(archive.read(metadata_files[0]))
               if (metadata["Name"], metadata["Version"]) != (
-                  "archolith-graphiti-core", "0.30.2.post2"
+                  "archolith-graphiti-core", "0.30.2.post3"
               ):
                   raise SystemExit("fork wheel name or version differs from reviewed release")
               required_hooks = {
                   "graphiti_core/candidate_filter.py",
+                  "graphiti_core/edge_expiry.py",
                   "graphiti_core/identity_gate.py",
                   "graphiti_core/node_pre_resolution.py",
                   "graphiti_core/llm_client/request_guard.py",
