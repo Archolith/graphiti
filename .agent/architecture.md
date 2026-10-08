@@ -283,8 +283,16 @@ and `_resolve_nodes_and_edges_bulk` (`resolve_extracted_edges`), `add_episode_bu
 (`dedupe_edges_bulk`) and `add_triplet` (`resolve_extracted_edge`).
 `tests/test_edge_expiry.py` has a structural guard that every resolver call in
 `graphiti_core` threads it; `menhir-compatibility.yml` runs it on every `menhir/**` PR.
-Known limitations (bulk pass-1 in-batch duplicates; diverging copies of one stored edge
-in a batch) are listed in the module docstring.
+The known limitation (bulk pass-1 in-batch duplicates) is listed in the module docstring.
+
+Copies of one stored edge: mentions resolve in parallel, each against its own fetched copy,
+and the edge save is a full replace per row, so the last copy saved would win.
+`reconcile_edge_copies` gives every copy with the same uuid the earliest `expired_at`, the
+earliest `invalid_at` and the union of `episodes`, in place, at the end of
+`resolve_extracted_edges` (`add_episode`) and where
+`_resolve_nodes_and_edges_bulk` combines episodes (`add_episode_bulk`). A supersession
+found by any mention therefore survives every save order, hook or not
+(`tests/test_edge_copy_reconcile.py`).
 
 ## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
 

@@ -536,6 +536,8 @@ async def resolve_extracted_edges(
         if resolved_edge.uuid == extracted_edge.uuid:
             new_edges.append(resolved_edge)
 
+    reconcile_edge_copies(resolved_edges + invalidated_edges)
+
     logger.debug(f'Resolved edges: {[e.uuid for e in resolved_edges]}')
     logger.debug(f'New edges (non-duplicates): {[e.uuid for e in new_edges]}')
 
@@ -545,6 +547,44 @@ async def resolve_extracted_edges(
     )
 
     return resolved_edges, invalidated_edges, new_edges
+
+
+def _earliest(values: list[datetime | None]) -> datetime | None:
+    earliest: datetime | None = None
+    earliest_utc: datetime | None = None
+    for value in values:
+        value_utc = ensure_utc(value)
+        if value_utc is not None and (earliest_utc is None or value_utc < earliest_utc):
+            earliest, earliest_utc = value, value_utc
+    return earliest
+
+
+def reconcile_edge_copies(edges: list[EntityEdge]) -> None:
+    """Give every copy of the same stored edge one merged state, in place.
+
+    Mentions resolve in parallel, each against its own fetched copy of a stored edge, and the
+    save is a full replace per row, so the last copy saved would win. One copy can be expired
+    by a contradiction while another stays live. Every copy instead takes the earliest
+    ``expired_at``, the earliest ``invalid_at`` (resolution only ever moves it earlier) and the
+    union of ``episodes``, so any supersession found by one mention survives in any save order.
+    """
+    copies: dict[str, list[EntityEdge]] = {}
+    for edge in edges:
+        copies.setdefault(edge.uuid, []).append(edge)
+    for group in copies.values():
+        if len(group) < 2:
+            continue
+        expired_at = _earliest([edge.expired_at for edge in group])
+        invalid_at = _earliest([edge.invalid_at for edge in group])
+        episodes: list[str] = []
+        for edge in group:
+            for episode_uuid in edge.episodes:
+                if episode_uuid not in episodes:
+                    episodes.append(episode_uuid)
+        for edge in group:
+            edge.expired_at = expired_at
+            edge.invalid_at = invalid_at
+            edge.episodes = list(episodes)
 
 
 def resolve_edge_contradictions(

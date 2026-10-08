@@ -49,9 +49,11 @@ Known limitations:
   resolved edge may be another unsaved edge of the same batch, and an ``EXPIRE`` written
   there is final, because later passes skip already-expired edges. A hook that keys its
   evidence by edge uuid should look up ``resolved_edge``, not only ``extracted_edge``;
-- when two extracted edges of one batch resolve to the same stored edge, each call works on
-  its own copy, and the copies are persisted in batch order (last write wins). Under
-  ``WORLD_END`` the copies can differ, so a supersession found by one copy can be lost.
+
+When two extracted edges of one batch resolve to the same stored edge, each call works on its
+own copy. ``reconcile_edge_copies`` (in ``edge_operations``) gives all copies the earliest
+``expired_at`` and ``invalid_at`` before anything is saved, so a supersession found by one
+copy is never overwritten by a live copy.
 """
 
 from dataclasses import dataclass
