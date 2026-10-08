@@ -22,6 +22,13 @@ from pydantic import BaseModel
 from typing_extensions import LiteralString
 
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
+from graphiti_core.edge_expiry import (
+    EdgeExpiryContext,
+    EdgeExpiryDecision,
+    EdgeExpiryHook,
+    edge_expiry_kwargs,
+    evaluate_edge_expiry_decision,
+)
 from graphiti_core.edges import (
     CommunityEdge,
     EntityEdge,
@@ -330,8 +337,12 @@ async def resolve_extracted_edges(
     edge_types: dict[str, type[BaseModel]],
     edge_type_map: dict[tuple[str, str], list[str]],
     existing_edges_override: list[EntityEdge] | None = None,
+    edge_expiry_hook: EdgeExpiryHook | None = None,
 ) -> tuple[list[EntityEdge], list[EntityEdge], list[EntityEdge]]:
     """Resolve extracted edges against existing graph context.
+
+    ``edge_expiry_hook`` is passed to every ``resolve_extracted_edge`` call; see
+    :mod:`graphiti_core.edge_expiry`.
 
     Returns
     -------
@@ -496,6 +507,7 @@ async def resolve_extracted_edges(
                     existing_edges,
                     episode,
                     extracted_edge_types,
+                    **edge_expiry_kwargs(edge_expiry_hook),
                 )
                 for extracted_edge, related_edges, existing_edges, extracted_edge_types in zip(
                     extracted_edges,
@@ -627,6 +639,7 @@ async def resolve_extracted_edge(
     existing_edges: list[EntityEdge],
     episode: EpisodicNode,
     edge_type_candidates: dict[str, type[BaseModel]] | None = None,
+    edge_expiry_hook: EdgeExpiryHook | None = None,
 ) -> tuple[EntityEdge, list[EntityEdge], list[EntityEdge]]:
     """Resolve an extracted edge against existing graph context.
 
@@ -644,6 +657,9 @@ async def resolve_extracted_edge(
         Episode providing content context when extracting edge attributes.
     edge_type_candidates : dict[str, type[BaseModel]] | None
         Custom edge types permitted for the current source/target signature.
+    edge_expiry_hook : EdgeExpiryHook | None
+        Optional hook deciding whether the resolved edge's own ``invalid_at`` expires it.
+        See :mod:`graphiti_core.edge_expiry`. When absent, upstream behavior.
 
     Returns
     -------
@@ -819,8 +835,25 @@ async def resolve_extracted_edge(
 
     now = utc_now()
 
+    # The edge's own end: upstream expires it; a hook may say it is a world-time end.
+    world_end_utc: datetime | None = None
     if resolved_edge.invalid_at and not resolved_edge.expired_at:
-        resolved_edge.expired_at = now
+        decision = EdgeExpiryDecision.EXPIRE
+        if edge_expiry_hook is not None:
+            decision = evaluate_edge_expiry_decision(
+                await edge_expiry_hook.decide_edge_expiry(
+                    EdgeExpiryContext(
+                        extracted_edge=extracted_edge,
+                        resolved_edge=resolved_edge,
+                        is_duplicate=resolved_edge.uuid != extracted_edge.uuid,
+                        episode=episode,
+                    )
+                )
+            )
+        if decision is EdgeExpiryDecision.WORLD_END:
+            world_end_utc = ensure_utc(resolved_edge.invalid_at)
+        else:
+            resolved_edge.expired_at = now
 
     # Determine if the new_edge needs to be expired
     if resolved_edge.expired_at is None:
@@ -832,6 +865,8 @@ async def resolve_extracted_edge(
                 candidate_valid_at_utc is not None
                 and resolved_edge_valid_at_utc is not None
                 and candidate_valid_at_utc > resolved_edge_valid_at_utc
+                # A world-ended fact is superseded only from inside its window.
+                and (world_end_utc is None or candidate_valid_at_utc < world_end_utc)
             ):
                 # Expire new edge since we have information about more recent events
                 resolved_edge.invalid_at = candidate.valid_at

@@ -29,6 +29,7 @@ from graphiti_core.driver.driver import (
     GraphDriverSession,
     GraphProvider,
 )
+from graphiti_core.edge_expiry import EdgeExpiryHook, edge_expiry_kwargs
 from graphiti_core.edges import Edge, EntityEdge, EpisodicEdge, create_entity_edge_embeddings
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.graphiti_types import GraphitiClients
@@ -534,6 +535,7 @@ async def dedupe_edges_bulk(
     _entities: list[EntityNode],
     edge_types: dict[str, type[BaseModel]],
     _edge_type_map: dict[tuple[str, str], list[str]],
+    edge_expiry_hook: EdgeExpiryHook | None = None,
 ) -> dict[str, list[EntityEdge]]:
     embedder = clients.embedder
     min_score = 0.6
@@ -592,6 +594,7 @@ async def dedupe_edges_bulk(
                 candidates,
                 episode,
                 edge_types,
+                **edge_expiry_kwargs(edge_expiry_hook),
             )
             for episode, edge, candidates in dedupe_tuples
         ]
