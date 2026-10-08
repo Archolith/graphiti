@@ -36,9 +36,22 @@ Effect of ``WORLD_END``:
   starts strictly before the edge's ``invalid_at`` (inside the fact's window). The edge's
   ``invalid_at`` then becomes the candidate's ``valid_at`` and it is expired. A candidate that
   starts at or after the end does not overlap the fact and is ignored;
+- when the edge's ``valid_at`` is unknown, its window is open: any contradicted candidate that
+  starts before the end expires it with ``invalid_at`` unchanged (the upstream result);
+- an inverted window (``invalid_at <= valid_at``) is malformed and is expired as upstream;
 - older contradicted edges are handled exactly as upstream.
 
-``EXPIRE`` (and no hook) is byte-for-byte upstream behavior.
+``EXPIRE`` (and no hook) is upstream behavior.
+
+Known limitations:
+
+- the decision applies to ``resolved_edge``. In ``dedupe_edges_bulk`` (bulk pass 1) the
+  resolved edge may be another unsaved edge of the same batch, and an ``EXPIRE`` written
+  there is final, because later passes skip already-expired edges. A hook that keys its
+  evidence by edge uuid should look up ``resolved_edge``, not only ``extracted_edge``;
+- when two extracted edges of one batch resolve to the same stored edge, each call works on
+  its own copy, and the copies are persisted in batch order (last write wins). Under
+  ``WORLD_END`` the copies can differ, so a supersession found by one copy can be lost.
 """
 
 from dataclasses import dataclass
@@ -69,9 +82,11 @@ class EdgeExpiryContext:
 
     - ``extracted_edge``: the newly extracted edge being resolved.
     - ``resolved_edge``: the edge resolution produced; the extracted edge itself, or the
-      existing edge it was resolved to as a duplicate.
-    - ``is_duplicate``: ``resolved_edge`` is an existing edge (its uuid differs).
-    - ``episode``: the episode being ingested, when there is one.
+      edge it was resolved to as a duplicate (a stored edge, or during bulk dedupe another
+      edge of the same batch).
+    - ``is_duplicate``: ``resolved_edge`` is not the extracted edge object.
+    - ``episode``: the episode being ingested. On ``add_triplet`` it is a synthetic, empty
+      episode node.
     """
 
     extracted_edge: EntityEdge

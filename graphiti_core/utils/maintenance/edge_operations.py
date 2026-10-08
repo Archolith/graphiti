@@ -845,29 +845,41 @@ async def resolve_extracted_edge(
                     EdgeExpiryContext(
                         extracted_edge=extracted_edge,
                         resolved_edge=resolved_edge,
-                        is_duplicate=resolved_edge.uuid != extracted_edge.uuid,
+                        is_duplicate=resolved_edge is not extracted_edge,
                         episode=episode,
                     )
                 )
             )
-        if decision is EdgeExpiryDecision.WORLD_END:
-            world_end_utc = ensure_utc(resolved_edge.invalid_at)
+        own_end_utc = ensure_utc(resolved_edge.invalid_at)
+        own_start_utc = ensure_utc(resolved_edge.valid_at)
+        # An inverted window (end <= start) is malformed; expire it as upstream does.
+        has_window = own_start_utc is None or (
+            own_end_utc is not None and own_end_utc > own_start_utc
+        )
+        if decision is EdgeExpiryDecision.WORLD_END and has_window:
+            world_end_utc = own_end_utc
         else:
             resolved_edge.expired_at = now
 
     # Determine if the new_edge needs to be expired
     if resolved_edge.expired_at is None:
         invalidation_candidates.sort(key=lambda c: (c.valid_at is None, ensure_utc(c.valid_at)))
+        resolved_edge_valid_at_utc = ensure_utc(resolved_edge.valid_at)
         for candidate in invalidation_candidates:
             candidate_valid_at_utc = ensure_utc(candidate.valid_at)
-            resolved_edge_valid_at_utc = ensure_utc(resolved_edge.valid_at)
-            if (
-                candidate_valid_at_utc is not None
-                and resolved_edge_valid_at_utc is not None
-                and candidate_valid_at_utc > resolved_edge_valid_at_utc
-                # A world-ended fact is superseded only from inside its window.
-                and (world_end_utc is None or candidate_valid_at_utc < world_end_utc)
-            ):
+            if candidate_valid_at_utc is None:
+                continue
+            # A world-ended fact is superseded only from inside its window.
+            if world_end_utc is not None and candidate_valid_at_utc >= world_end_utc:
+                continue
+            if resolved_edge_valid_at_utc is None:
+                if world_end_utc is not None:
+                    # Undated start: the window is open, so an in-window contradiction
+                    # expires it as upstream would, without inventing a truncation date.
+                    resolved_edge.expired_at = now
+                    break
+                continue
+            if candidate_valid_at_utc > resolved_edge_valid_at_utc:
                 # Expire new edge since we have information about more recent events
                 resolved_edge.invalid_at = candidate.valid_at
                 resolved_edge.expired_at = now

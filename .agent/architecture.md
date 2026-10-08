@@ -266,12 +266,15 @@ The hook gets a frozen `EdgeExpiryContext` (`extracted_edge`, `resolved_edge`,
 `is_duplicate`, `episode`; models borrowed, read-only by contract) and returns an
 `EdgeExpiryDecision`:
 
-- `EXPIRE`: upstream behavior, byte for byte (same as no hook).
+- `EXPIRE`: upstream behavior (same as no hook).
 - `WORLD_END`: `invalid_at` is the fact's world-time end. Path 1 is skipped. Path 2 (a
   contradicted candidate newer than the edge) gains an overlap rule: only a candidate whose
   `valid_at` is strictly before the edge's `invalid_at` truncates `invalid_at` to the
   candidate's `valid_at` and expires the edge; a candidate at or after the end is ignored.
-  Path 3 (`resolve_edge_contradictions`, older contradicted edges) is unchanged.
+  With an undated start the window is open: an in-window contradiction expires the edge
+  with `invalid_at` kept (the upstream result). An inverted window (`invalid_at <=
+  valid_at`) is expired as upstream. Path 3 (`resolve_edge_contradictions`, older
+  contradicted edges) is unchanged.
 
 Any other return value raises `TypeError`; hook exceptions propagate and abort the call. No
 module-global state, `ContextVar` or cache. The hook is forwarded only when configured
@@ -279,7 +282,9 @@ module-global state, `ContextVar` or cache. The hook is forwarded only when conf
 and `_resolve_nodes_and_edges_bulk` (`resolve_extracted_edges`), `add_episode_bulk`
 (`dedupe_edges_bulk`) and `add_triplet` (`resolve_extracted_edge`).
 `tests/test_edge_expiry.py` has a structural guard that every resolver call in
-`graphiti_core` threads it.
+`graphiti_core` threads it; `menhir-compatibility.yml` runs it on every `menhir/**` PR.
+Known limitations (bulk pass-1 in-batch duplicates; diverging copies of one stored edge
+in a batch) are listed in the module docstring.
 
 ## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
 

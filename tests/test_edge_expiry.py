@@ -36,7 +36,7 @@ from graphiti_core.embedder import EmbedderClient
 from graphiti_core.errors import EdgeNotFoundError, NodeNotFoundError
 from graphiti_core.graphiti import Graphiti
 from graphiti_core.llm_client import LLMClient
-from graphiti_core.nodes import EntityNode, EpisodicNode
+from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from graphiti_core.search.search_config import SearchResults
 from graphiti_core.utils.maintenance.edge_operations import (
     resolve_extracted_edge,
@@ -98,7 +98,7 @@ def _episode() -> EpisodicNode:
         uuid='episode_uuid',
         name='Episode',
         group_id=GROUP_ID,
-        source='message',
+        source=EpisodeType.message,
         source_description='desc',
         content='Episode content',
         valid_at=FIXED_NOW,
@@ -555,6 +555,28 @@ def _resolver_calls(path: Path) -> list[ast.Call]:
     return calls
 
 
+def _names_edge_expiry_hook(arg: ast.expr) -> bool:
+    """The argument is ``edge_expiry_hook`` or ``<obj>.edge_expiry_hook``, never a literal."""
+    if isinstance(arg, ast.Name):
+        return arg.id == 'edge_expiry_hook'
+    return isinstance(arg, ast.Attribute) and arg.attr == 'edge_expiry_hook'
+
+
+def test_structural_guard_rejects_wrong_hook_arguments():
+    for source in (
+        'f(**edge_expiry_kwargs(None))',
+        'f(**edge_expiry_kwargs(self.identity_gate_hook))',
+        'f(**edge_expiry_kwargs())',
+    ):
+        call = ast.parse(source, mode='eval').body
+        assert isinstance(call, ast.Call)
+        inner = call.keywords[0].value
+        assert isinstance(inner, ast.Call)
+        assert not (len(inner.args) == 1 and _names_edge_expiry_hook(inner.args[0]))
+    for source in ('edge_expiry_hook', 'self.edge_expiry_hook'):
+        assert _names_edge_expiry_hook(ast.parse(source, mode='eval').body)
+
+
 def test_every_resolver_call_in_graphiti_core_threads_the_hook():
     """Structural guard: a new resolver call site without the hook would bypass it."""
     package = Path(__file__).resolve().parents[1] / 'graphiti_core'
@@ -569,6 +591,8 @@ def test_every_resolver_call_in_graphiti_core_threads_the_hook():
                 and isinstance(kw.value, ast.Call)
                 and isinstance(kw.value.func, ast.Name)
                 and kw.value.func.id == 'edge_expiry_kwargs'
+                and len(kw.value.args) == 1
+                and _names_edge_expiry_hook(kw.value.args[0])
             ]
             assert threaded, f'{path.name}:{call.lineno} does not thread edge_expiry_hook'
     # graphiti.py x4, bulk_utils.py x1, edge_operations.py x1
@@ -583,3 +607,153 @@ def test_no_menhir_imports_in_edge_expiry_mechanism():
             assert not node.module.lower().startswith('menhir')
         elif isinstance(node, ast.Import):
             assert all(not alias.name.lower().startswith('menhir') for alias in node.names)
+
+
+# --- review follow-ups (PR #5) ------------------------------------------------------------
+
+
+def _undated_rome() -> EntityEdge:
+    return _edge('Alice was in Rome until Apr 1', valid_at=None)
+
+
+def _milan(valid_at: datetime) -> EntityEdge:
+    return _edge('Alice moved to Milan', valid_at=valid_at, invalid_at=None)
+
+
+async def test_world_end_undated_start_contradiction_inside_window_expires():
+    """F1: an undated start is an open window; an in-window contradiction still expires it."""
+    hook = RecordingExpiryHook()
+    _, resolved, _, _ = await _resolve(
+        hook,
+        extracted=_undated_rome(),
+        existing=[_milan(TRIP_END - timedelta(days=12))],
+        llm=_llm(contradicted_facts=[1]),
+    )
+
+    assert len(hook.contexts) == 1
+    assert resolved.expired_at == FIXED_NOW
+    assert resolved.invalid_at == TRIP_END
+
+
+async def test_world_end_undated_start_matches_no_hook_result_on_contradiction():
+    inside = TRIP_END - timedelta(days=12)
+    _, baseline, base_inv, _ = await _resolve(
+        None, extracted=_undated_rome(), existing=[_milan(inside)], llm=_llm(contradicted_facts=[1])
+    )
+    _, resolved, invalidated, _ = await _resolve(
+        RecordingExpiryHook(),
+        extracted=_undated_rome(),
+        existing=[_milan(inside)],
+        llm=_llm(contradicted_facts=[1]),
+    )
+    assert _snapshot(resolved) == _snapshot(baseline)
+    assert [_snapshot(e) for e in invalidated] == [_snapshot(e) for e in base_inv]
+
+
+async def test_world_end_undated_start_contradiction_after_end_is_ignored():
+    _, resolved, _, _ = await _resolve(
+        RecordingExpiryHook(),
+        extracted=_undated_rome(),
+        existing=[_milan(TRIP_END + timedelta(days=3))],
+        llm=_llm(contradicted_facts=[1]),
+    )
+    assert resolved.expired_at is None
+    assert resolved.invalid_at == TRIP_END
+
+
+async def test_world_end_undated_start_without_contradiction_stays_live():
+    _, resolved, _, _ = await _resolve(RecordingExpiryHook(), extracted=_undated_rome())
+    assert resolved.expired_at is None
+
+
+@pytest.mark.parametrize('start', [TRIP_END, TRIP_END + timedelta(days=1)])
+async def test_world_end_inverted_window_is_expired_as_upstream(start):
+    """F6: end <= start is malformed; WORLD_END must not keep it live."""
+    extracted = _edge('Alice was in Rome', valid_at=start, invalid_at=TRIP_END)
+    hook = RecordingExpiryHook()
+    _, resolved, _, _ = await _resolve(hook, extracted=extracted)
+    assert len(hook.contexts) == 1
+    assert resolved.expired_at == FIXED_NOW
+    assert resolved.invalid_at == TRIP_END
+
+
+async def test_is_duplicate_uses_identity_not_uuid():
+    """F3: add_triplet can keep the caller's uuid, so a stored duplicate may share it."""
+    stored = _edge('Alice was in Rome Mar 27 - Apr 1')
+    extracted = _edge('Alice visited Rome')
+    extracted.uuid = stored.uuid
+    hook = RecordingExpiryHook()
+    _, resolved, _, _ = await _resolve(
+        hook, extracted=extracted, related=[stored], llm=_llm(duplicate_facts=[0])
+    )
+    assert resolved is stored
+    (context,) = hook.contexts
+    assert context.is_duplicate is True
+
+
+async def test_world_end_picks_earliest_in_window_candidate():
+    """F12.1: candidates in any order; the earliest one inside the window truncates."""
+    candidates = [_milan(TRIP_START + timedelta(days=d)) for d in (9, 3, 1)]
+    _, resolved, _, _ = await _resolve(
+        RecordingExpiryHook(), existing=candidates, llm=_llm(contradicted_facts=[1, 2, 3])
+    )
+    assert resolved.invalid_at == TRIP_START + timedelta(days=1)
+    assert resolved.expired_at == FIXED_NOW
+
+
+async def test_world_end_naive_edge_with_aware_candidate_inside_window():
+    """F12.2: naive datetimes are treated as UTC."""
+    extracted = _edge(
+        'Alice was in Rome',
+        valid_at=TRIP_START.replace(tzinfo=None),
+        invalid_at=TRIP_END.replace(tzinfo=None),
+    )
+    inside = TRIP_START + timedelta(days=2)
+    _, resolved, _, _ = await _resolve(
+        RecordingExpiryHook(),
+        extracted=extracted,
+        existing=[_milan(inside)],
+        llm=_llm(contradicted_facts=[1]),
+    )
+    assert resolved.invalid_at == inside
+    assert resolved.expired_at == FIXED_NOW
+
+
+async def test_world_end_offset_end_with_naive_candidate_at_same_instant_is_ignored():
+    end = TRIP_END.astimezone(timezone(timedelta(hours=5)))
+    extracted = _edge('Alice was in Rome', invalid_at=end)
+    _, resolved, _, _ = await _resolve(
+        RecordingExpiryHook(),
+        extracted=extracted,
+        existing=[_milan(TRIP_END.replace(tzinfo=None))],
+        llm=_llm(contradicted_facts=[1]),
+    )
+    assert resolved.expired_at is None
+    assert resolved.invalid_at == end
+
+
+def _baseline_scenario(scenario: str) -> dict:
+    if scenario == 'duplicate':
+        return {
+            'related': [_edge('Alice was in Rome Mar 27 - Apr 1', episodes=['first'])],
+            'llm': _llm(duplicate_facts=[0]),
+        }
+    if scenario == 'contradiction':
+        return {
+            'existing': [_milan(TRIP_START + timedelta(days=2))],
+            'llm': _llm(contradicted_facts=[1]),
+        }
+    older = _edge('Alice was in Paris', valid_at=TRIP_START - timedelta(days=5), invalid_at=None)
+    return {'existing': [older], 'llm': _llm(contradicted_facts=[1])}
+
+
+@pytest.mark.parametrize('scenario', ['duplicate', 'contradiction', 'older_contradiction'])
+async def test_expire_hook_matches_no_hook_baseline(scenario):
+    """F12.7: EXPIRE is diffed against the no-hook run, not hand-written values."""
+    _, baseline, base_inv, base_dup = await _resolve(None, **_baseline_scenario(scenario))
+    _, resolved, invalidated, duplicates = await _resolve(
+        RecordingExpiryHook(EdgeExpiryDecision.EXPIRE), **_baseline_scenario(scenario)
+    )
+    assert _snapshot(resolved) == _snapshot(baseline)
+    assert [_snapshot(e) for e in invalidated] == [_snapshot(e) for e in base_inv]
+    assert [_snapshot(e) for e in duplicates] == [_snapshot(e) for e in base_dup]

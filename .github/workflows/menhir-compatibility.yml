@@ -29,7 +29,8 @@ jobs:
       - name: Check reconciled routing
         run: |
           ruff check graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py tests/test_extraction_routing.py tests/test_candidate_filter.py tests/test_identity_gate.py tests/test_node_pre_resolution.py tests/test_request_scope_concurrency.py
-          pyright graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py
+          ruff check graphiti_core/edge_expiry.py graphiti_core/utils/maintenance/edge_operations.py graphiti_core/utils/bulk_utils.py tests/test_edge_expiry.py
+          pyright graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py graphiti_core/edge_expiry.py graphiti_core/utils/maintenance/edge_operations.py graphiti_core/utils/bulk_utils.py
       - name: Verify fork contracts and upstream changes without services
         run: |
           python -m pytest -q --timeout=60 \
@@ -44,6 +45,8 @@ jobs:
             tests/test_prompt_json.py tests/test_response_model_normalization.py \
             tests/test_structured_summary_prompts.py tests/utils/maintenance/test_untyped_attribute_preservation.py \
             tests/test_saga_refetch_episode_uuids.py tests/test_handle_multiple_group_ids.py \
-            tests/utils/maintenance/test_node_operations.py
+            tests/utils/maintenance/test_node_operations.py \
+            tests/test_edge_expiry.py tests/utils/maintenance/test_edge_operations.py \
+            tests/utils/maintenance/test_bulk_utils.py
       - name: Build distributable
         run: python -m build
