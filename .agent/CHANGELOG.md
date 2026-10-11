@@ -1,5 +1,12 @@
 # Changelog — graphiti
 
+## 2026-10-11 — Release prep for `v0.30.2.post7`
+
+- `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
+  wheel version check), `README.md`, `CHANGELOG.md`: bump the published version to `0.30.2.post7`, which carries
+  #13 (a stale Neo4j save never undoes a stored expiry) from `menhir/main` @ `1e0f06a`. Tag
+  `v0.30.2.post7` on the merged release-prep commit triggers the PyPI release.
+
 ## 2026-10-11 — A stale save never makes a stored expired edge live again (Neo4j)
 
 - `graphiti_core/models/edges/edge_db_queries.py`: the Neo4j entity-edge save and bulk save
