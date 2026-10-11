@@ -5,6 +5,20 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.30.2.post5 — 2026-10-10
+
+Maintenance release on the same upstream Graphiti 0.30.2 base.
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.30.2.post5) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.30.2.post5/)
+
+### Fixed
+
+- When copies of one stored edge are reconciled, `attributes` now come from the last
+  copy whose attributes resolution recomputed (or cleared). Previously the first
+  copy's attributes won, so an exact-fact mention that kept the stored attributes
+  could overwrite a paraphrase's recomputed ones. With no recomputed copy the
+  attributes are left alone ([#9](https://github.com/Archolith/graphiti/pull/9)).
+
 ## 0.30.2.post4 — 2026-10-08
 
 Maintenance release on the same upstream Graphiti 0.30.2 base.

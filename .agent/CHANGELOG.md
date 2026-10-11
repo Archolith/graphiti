@@ -1,5 +1,12 @@
 # Changelog — graphiti
 
+## 2026-10-10 — Release prep for `v0.30.2.post5`
+
+- `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
+  wheel version check), `README.md`, `CHANGELOG.md`: bump the published version to `0.30.2.post5`, which carries
+  #9 (recomputed attributes win when reconciling edge copies) from `menhir/main` @ `a36e307`. Tag
+  `v0.30.2.post5` on the merged release-prep commit triggers the PyPI release.
+
 ## 2026-10-08 — Reconciled copies take recomputed attributes, not fast-path ones
 
 - `graphiti_core/edges.py`: `EntityEdge` gains the private, never-saved
