@@ -60,6 +60,20 @@ EPISODIC_EDGE_RETURN = """
 """
 
 
+# Full-replace save of a Neo4j entity edge that never makes a stored expired edge live again.
+# A writer that fetched the edge before another writer expired it would otherwise save it back
+# with expired_at null. The lock write comes first so the stored values read next are the latest
+# committed ones (read committed); the full replace then drops the lock property.
+_NEO4J_KEEP_STORED_EXPIRY = """
+                SET e._graphiti_save_lock = true
+                WITH e{carry}, e.expired_at AS stored_expired_at, e.invalid_at AS stored_invalid_at
+                SET e = {row}
+                FOREACH (keep IN CASE WHEN stored_expired_at IS NOT NULL AND {row}.expired_at IS NULL
+                                   THEN [1] ELSE [] END |
+                    SET e.expired_at = stored_expired_at, e.invalid_at = stored_invalid_at)
+"""
+
+
 def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) -> str:
     match provider:
         case GraphProvider.FALKORDB:
@@ -112,8 +126,8 @@ def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) 
                         MATCH (source:Entity {uuid: $edge_data.source_uuid})
                         MATCH (target:Entity {uuid: $edge_data.target_uuid})
                         MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
-                        SET e = $edge_data
                         """
+                    + _NEO4J_KEEP_STORED_EXPIRY.format(row='$edge_data', carry='')
                     + save_embedding_query
                 )
                 + """
@@ -177,8 +191,8 @@ def get_entity_edge_save_bulk_query(provider: GraphProvider, has_aoss: bool = Fa
                     MATCH (source:Entity {uuid: edge.source_node_uuid})
                     MATCH (target:Entity {uuid: edge.target_node_uuid})
                     MERGE (source)-[e:RELATES_TO {uuid: edge.uuid}]->(target)
-                    SET e = edge
                     """
+                + _NEO4J_KEEP_STORED_EXPIRY.format(row='edge', carry=', edge')
                 + save_embedding_query
                 + """
                 RETURN edge.uuid AS uuid
