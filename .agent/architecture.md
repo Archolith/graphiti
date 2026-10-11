@@ -297,8 +297,11 @@ found by any mention therefore survives every save order, hook or not
 in-memory, never-saved `EntityEdge._attributes_resolved` mark: `resolve_extracted_edge` sets it
 where it computes or clears attributes, and `resolve_extracted_edges` resets it on every
 candidate before resolving. A copy from the exact-fact fast path, or one that is only an
-invalidation candidate, keeps its fetched attributes and never overrides a recomputed copy;
-with no recomputed copy, attributes are left alone (`tests/test_edge_copy_attributes.py`).
+invalidation candidate, is never the source of the attributes, so its fetched ones never
+override a recomputed copy; with no recomputed copy, attributes are left alone
+(`tests/test_edge_copy_attributes.py`, including the bulk path). Assumption: concurrent
+bulk episodes do not share one candidate object (the drivers here build fresh objects per
+search); a shared object could have its mark cleared by another episode's reset.
 A uuid group whose edges differ in group, endpoints
 or fact is not copies of one edge; it is logged and left alone. `add_triplet` is not
 reconciled: an update by an existing uuid can meet its own stored copy among the

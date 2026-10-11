@@ -285,7 +285,8 @@ class EntityEdge(Edge):
     )
     # In-memory only, never saved: set when edge resolution recomputed (or cleared) the
     # attributes of this object. reconcile_edge_copies uses it to prefer those attributes
-    # over a copy that kept its fetched ones.
+    # over a copy that kept its fetched ones. model_copy/deepcopy carry it; the reset in
+    # resolve_extracted_edges clears it before each resolution.
     _attributes_resolved: bool = PrivateAttr(default=False)
 
     @model_validator(mode='before')

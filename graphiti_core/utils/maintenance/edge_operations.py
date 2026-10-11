@@ -497,7 +497,10 @@ async def resolve_extracted_edges(
         edge_types_lst.append(extracted_edge_types)
 
     # A resolved-attributes mark must come from this resolution, not from an earlier one that
-    # handed back the same object (a driver or cache may reuse edge objects).
+    # handed back the same object. This covers reuse across successive calls only: concurrent
+    # calls (add_episode_bulk episodes) that share one candidate object can clear each other's
+    # marks, so the bulk path assumes searches return fresh objects, as the drivers here do.
+    # Resetting the extracted edges is defensive; they are new objects in every caller here.
     for edge in extracted_edges:
         edge._attributes_resolved = False
     for candidates in (*related_edges_lists, *edge_invalidation_candidates):
@@ -583,9 +586,10 @@ def reconcile_edge_copies(
     copies that differ always differ by a truncation) and the union of ``episodes``, so any
     supersession found by one mention survives in any save order. ``attributes`` come from the
     last copy whose attributes resolution recomputed or cleared (list order; across a bulk
-    batch, the later episode's list). A copy returned by the exact-fact fast path, or passed
-    only as an invalidation candidate, keeps the attributes it was fetched with, so it never
-    overrides a recomputed copy. When no copy was recomputed, attributes are left as they are.
+    batch, the episode later in the caller's list, not by date). A copy returned by the
+    exact-fact fast path, or passed only as an invalidation candidate, is never the source,
+    so its fetched attributes never override a recomputed copy; it takes the recomputed ones
+    like every other copy. When no copy was recomputed, attributes are left as they are.
 
     Copies always agree on group, endpoints and fact. A uuid group that does not is not copies
     of one edge; it is left untouched and logged.

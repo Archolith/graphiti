@@ -13,8 +13,10 @@ from uuid import uuid4
 import pytest
 from pydantic import BaseModel
 
+import graphiti_core.graphiti as graphiti_module
 import graphiti_core.utils.maintenance.edge_operations as edge_ops
 from graphiti_core.edges import EntityEdge
+from graphiti_core.graphiti import Graphiti
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from graphiti_core.search.search_config import SearchResults
 from graphiti_core.utils.maintenance.edge_operations import (
@@ -47,27 +49,52 @@ def _edge(fact: str, *, uuid: str | None = None, attributes: dict | None = None)
     )
 
 
-async def _resolve(monkeypatch, mentions, *, with_schema, stored_factory=None):
-    """Resolve ``mentions`` in one batch; each search returns a fresh copy of the stored edge.
+def _stored(*, mark: bool = False) -> EntityEdge:
+    edge = _edge(STORED_FACT, uuid=STORED_UUID, attributes={'rating': 1})
+    edge.valid_at = FIXED_NOW - timedelta(days=30)
+    edge._attributes_resolved = mark
+    return edge
 
-    The paraphrase is answered as a duplicate of the stored edge (index 0); attribute
-    extraction answers ``rating=2``. The stored edge carries ``rating=1``.
+
+def _episode(index: int) -> EpisodicNode:
+    return EpisodicNode(
+        uuid=f'episode_{index}',
+        name=f'Episode {index}',
+        group_id=GROUP_ID,
+        source=EpisodeType.message,
+        source_description='desc',
+        content='Episode content',
+        valid_at=FIXED_NOW,
+    )
+
+
+def _schema(with_schema: bool) -> tuple[dict[str, type[BaseModel]], dict]:
+    if not with_schema:
+        return {}, {}
+    return {'RATED': Rating}, {('Entity', 'Entity'): ['RATED']}
+
+
+def _patch(monkeypatch, *, fake_search=None, contradicting_fact=None):
+    """Patch resolution; returns the list of dedupe (non-attribute) prompts the LLM answered.
+
+    Every search returns a fresh copy of the stored edge unless ``fake_search`` is given. A
+    mention is answered as a duplicate of the stored edge (index 0), or, when its fact is
+    ``contradicting_fact``, as contradicting it. Attribute extraction answers ``rating=2``.
     """
-
-    def fresh_stored() -> EntityEdge:
-        return _edge(STORED_FACT, uuid=STORED_UUID, attributes={'rating': 1})
-
-    stored_factory = stored_factory or fresh_stored
+    dedupe_prompts: list[str] = []
 
     async def immediate_gather(*aws, max_coroutines=None):
         return [await aw for aw in aws]
 
-    async def fake_search(clients, query, group_ids, config, search_filter):
-        return SearchResults(edges=[stored_factory()])
+    async def fresh_search(clients, query, group_ids, config, search_filter):
+        return SearchResults(edges=[_stored()])
 
     async def generate_response(messages, **kwargs):
         if kwargs.get('prompt_name') == 'extract_edges.extract_attributes':
             return {'rating': 2}
+        dedupe_prompts.append(str(messages))
+        if contradicting_fact is not None and contradicting_fact in str(messages):
+            return {'duplicate_facts': [], 'contradicted_facts': [0]}
         return {'duplicate_facts': [0], 'contradicted_facts': []}
 
     llm = MagicMock()
@@ -77,31 +104,34 @@ async def _resolve(monkeypatch, mentions, *, with_schema, stored_factory=None):
     monkeypatch.setattr(edge_ops, 'create_entity_edge_embeddings', AsyncMock(return_value=None))
     monkeypatch.setattr(edge_ops, '_extract_edge_timestamps', AsyncMock(return_value=None))
     monkeypatch.setattr(EntityEdge, 'get_between_nodes', AsyncMock(return_value=[]))
-    monkeypatch.setattr(edge_ops, 'search', fake_search)
-
+    monkeypatch.setattr(edge_ops, 'search', fake_search or fresh_search)
     clients = SimpleNamespace(
         driver=MagicMock(), llm_client=llm, embedder=MagicMock(), cross_encoder=MagicMock()
     )
-    nodes = [
-        EntityNode(uuid='source_uuid', name='Alice', group_id=GROUP_ID, labels=['Entity']),
-        EntityNode(uuid='target_uuid', name='Rome hotel', group_id=GROUP_ID, labels=['Entity']),
-    ]
-    episode = EpisodicNode(
-        uuid='episode_1',
-        name='Episode',
-        group_id=GROUP_ID,
-        source=EpisodeType.message,
-        source_description='desc',
-        content='Episode content',
-        valid_at=FIXED_NOW,
-    )
-    edge_types: dict[str, type[BaseModel]] = {'RATED': Rating} if with_schema else {}
-    edge_type_map = {('Entity', 'Entity'): ['RATED']} if with_schema else {}
+    return clients, dedupe_prompts
+
+
+NODES = [
+    EntityNode(uuid='source_uuid', name='Alice', group_id=GROUP_ID, labels=['Entity']),
+    EntityNode(uuid='target_uuid', name='Rome hotel', group_id=GROUP_ID, labels=['Entity']),
+]
+
+
+async def _resolve(monkeypatch, mentions, *, with_schema, stored_factory=None):
+    """Resolve ``mentions`` in one episode; returns every copy of the stored edge."""
+    fake_search = None
+    if stored_factory is not None:
+
+        async def fake_search(clients, query, group_ids, config, search_filter):
+            return SearchResults(edges=[stored_factory()])
+
+    clients, _ = _patch(monkeypatch, fake_search=fake_search)
+    edge_types, edge_type_map = _schema(with_schema)
     resolved, invalidated, _ = await resolve_extracted_edges(
         clients,  # type: ignore[arg-type]
         mentions,
-        episode,
-        nodes,
+        _episode(1),
+        NODES,
         edge_types,
         edge_type_map,
     )
@@ -147,6 +177,101 @@ async def test_a_mark_left_from_an_earlier_resolution_is_ignored(monkeypatch, ex
     )
 
     assert [edge.attributes for edge in copies] == [{'rating': 2}, {'rating': 2}]
+
+
+async def test_the_exact_mention_takes_the_fast_path(monkeypatch):
+    """Guards the premise of the tests above: only the paraphrase reaches the LLM dedupe."""
+    clients, dedupe_prompts = _patch(monkeypatch)
+    edge_types, edge_type_map = _schema(True)
+
+    await resolve_extracted_edges(
+        clients,  # type: ignore[arg-type]
+        _mentions(exact_first=True),
+        _episode(1),
+        NODES,
+        edge_types,
+        edge_type_map,
+    )
+
+    assert len(dedupe_prompts) == 1 and PARAPHRASE in dedupe_prompts[0]
+
+
+@pytest.mark.parametrize('paraphrase_first', [True, False])
+async def test_a_stale_mark_on_an_invalidation_candidate_is_ignored(monkeypatch, paraphrase_first):
+    """A reused object, marked by an earlier resolution, arrives only as an invalidation
+    candidate of a newer contradicting mention. Its stale attributes must not win."""
+    newer = 'Alice now rates the Rome hotel differently'
+
+    async def fake_search(clients, query, group_ids, config, search_filter):
+        if query != newer:
+            return SearchResults(edges=[_stored()])
+        if search_filter.edge_uuids is not None:
+            return SearchResults(edges=[])  # no duplicate candidates for the newer mention
+        return SearchResults(edges=[_stored(mark=True)])
+
+    clients, _ = _patch(monkeypatch, fake_search=fake_search, contradicting_fact=newer)
+    edge_types, edge_type_map = _schema(True)
+    paraphrase = _edge(PARAPHRASE)
+    contradicting = _edge(newer)
+    contradicting.valid_at = FIXED_NOW
+    mentions = [paraphrase, contradicting] if paraphrase_first else [contradicting, paraphrase]
+
+    resolved, invalidated, _ = await resolve_extracted_edges(
+        clients,  # type: ignore[arg-type]
+        mentions,
+        _episode(1),
+        NODES,
+        edge_types,
+        edge_type_map,
+    )
+
+    invalidated_copies = [edge for edge in invalidated if edge.uuid == STORED_UUID]
+    resolved_copies = [edge for edge in resolved if edge.uuid == STORED_UUID]
+    assert len(invalidated_copies) == 1 and len(resolved_copies) == 1
+    assert [edge.attributes for edge in resolved_copies + invalidated_copies] == [
+        {'rating': 2},
+        {'rating': 2},
+    ]
+
+
+@pytest.mark.parametrize('paraphrase_first', [True, False])
+async def test_bulk_episodes_keep_the_recomputed_attributes(monkeypatch, paraphrase_first):
+    """add_episode_bulk: one episode paraphrases the stored edge, another states it exactly.
+    Real per-episode resolution, then the cross-episode reconcile, in both episode orders."""
+    clients, _ = _patch(monkeypatch)
+    monkeypatch.setattr(
+        graphiti_module, 'resolve_extracted_nodes', AsyncMock(return_value=([], {}))
+    )
+    monkeypatch.setattr(
+        graphiti_module, 'extract_attributes_from_nodes', AsyncMock(return_value=NODES)
+    )
+    episodes = [_episode(1), _episode(2)]
+    first, second = _edge(PARAPHRASE), _edge(STORED_FACT)
+    if not paraphrase_first:
+        first, second = second, first
+    edge_types, edge_type_map = _schema(True)
+
+    graphiti = object.__new__(Graphiti)
+    graphiti.clients = clients  # type: ignore[assignment]
+    graphiti.edge_expiry_hook = None
+    graphiti.identity_gate_hook = None
+    graphiti.candidate_filter_hook = None
+    graphiti.node_pre_resolution_hook = None
+
+    _, resolved, invalidated, _ = await graphiti._resolve_nodes_and_edges_bulk(
+        {episode.uuid: [] for episode in episodes},
+        {'episode_1': [first], 'episode_2': [second]},
+        [(episode, []) for episode in episodes],
+        None,
+        edge_types,
+        edge_type_map,
+        episodes,
+    )
+
+    copies = [edge for edge in resolved + invalidated if edge.uuid == STORED_UUID]
+    assert len(copies) == 2
+    assert [edge.attributes for edge in copies] == [{'rating': 2}, {'rating': 2}]
+    assert all(edge.episodes == ['episode_0', 'episode_1', 'episode_2'] for edge in copies)
 
 
 def test_without_a_recomputed_copy_attributes_are_untouched():

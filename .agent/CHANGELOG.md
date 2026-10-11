@@ -12,9 +12,14 @@
   first overwrote a paraphrase's recomputed or cleared attributes in every save order
   (Codex review P3b-R2-1).
 - `tests/test_edge_copy_attributes.py`: NEW (exact + paraphrase in both orders, with and
-  without a schema; stale mark from a reused object; last-marked rule; mark never serialized);
-  added to `menhir-compatibility.yml`. `tests/test_edge_copy_reconcile.py`: the two hand-built
-  "recomputed" copies now set the mark (setup only, assertions unchanged).
+  without a schema; the exact mention takes the fast path; stale mark from a reused object, on
+  a duplicate candidate and on an invalidation-only candidate; bulk episodes in both orders
+  through real resolution; last-marked rule; mark never serialized); added to
+  `menhir-compatibility.yml` (ruff and pytest; `edges.py` to ruff and pyright).
+  `tests/test_edge_copy_reconcile.py`: the two hand-built "recomputed" copies now set the mark
+  (setup only, assertions unchanged).
+- Assumption (documented at the reset): concurrent bulk episodes do not share one candidate
+  object; the drivers here build fresh objects per search.
 
 ## 2026-10-08 — Reconcile copies of one stored edge before the save
 
