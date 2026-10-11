@@ -150,6 +150,24 @@ class AddTripletResults(BaseModel):
     edges: list[EntityEdge]
 
 
+def _preserved_edge_attribute_names(value: Iterable[str] | None) -> frozenset[str]:
+    """Validate ``Graphiti(preserved_edge_attributes=...)`` and return it as a frozenset."""
+    if value is None:
+        return frozenset()
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(
+            'preserved_edge_attributes must be an iterable of property names, not a string'
+        )
+    names = list(value)
+    for name in names:
+        if not isinstance(name, str) or not name.strip():
+            raise TypeError(
+                'preserved_edge_attributes entries must be non-blank str, '
+                f'got {type(name).__name__} {name!r}'
+            )
+    return frozenset(names)
+
+
 class Graphiti:
     # Class-level default so instances that bypass __init__ (subclasses, test
     # doubles, unpickled-style instances) safely observe "no hook configured" and
@@ -273,6 +291,9 @@ class Graphiti:
         Graphiti if you're using the default OpenAIClient.
         """
 
+        # Validate before any driver or client is created, so a bad value leaks nothing.
+        preserved_names = _preserved_edge_attribute_names(preserved_edge_attributes)
+
         if graph_driver:
             self.driver = graph_driver
         else:
@@ -329,21 +350,7 @@ class Graphiti:
         self.edge_expiry_hook = edge_expiry_hook
 
         # Caller-owned edge properties kept across duplicate resolution (neutral; no policy)
-        if preserved_edge_attributes is None:
-            self.preserved_edge_attributes = frozenset()
-        else:
-            if isinstance(preserved_edge_attributes, (str, bytes)):
-                raise TypeError(
-                    'preserved_edge_attributes must be an iterable of property names, not a string'
-                )
-            preserved_names = list(preserved_edge_attributes)
-            for name in preserved_names:
-                if not isinstance(name, str) or not name:
-                    raise TypeError(
-                        'preserved_edge_attributes entries must be non-empty str, '
-                        f'got {type(name).__name__}'
-                    )
-            self.preserved_edge_attributes = frozenset(preserved_names)
+        self.preserved_edge_attributes = preserved_names
 
         # Capture telemetry event
         self._capture_initialization_telemetry()

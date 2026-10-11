@@ -747,7 +747,8 @@ async def resolve_extracted_edge(
     preserved_attributes : frozenset[str]
         Names of edge properties stored by the caller outside Graphiti. On the LLM
         duplicate path they keep their stored values when attributes are recomputed
-        or cleared, so the edge save does not drop them.
+        or cleared, so the edge save does not drop them; only a schema field the
+        recomputation produced overrides one. A new (non-duplicate) edge is unaffected.
 
     Returns
     -------
@@ -882,9 +883,16 @@ async def resolve_extracted_edge(
 
     # Only extract structured attributes if the edge's relation_type matches an allowed custom type
     # AND the edge model exists for this node pair signature
-    kept = {
-        key: value for key, value in resolved_edge.attributes.items() if key in preserved_attributes
-    }
+    # Stored values of caller-owned keys on a duplicate; a new edge clears as upstream.
+    kept = (
+        {
+            key: value
+            for key, value in (resolved_edge.attributes or {}).items()
+            if key in preserved_attributes
+        }
+        if preserved_attributes and resolved_edge is not extracted_edge
+        else {}
+    )
     edge_model = edge_type_candidates.get(resolved_edge.name) if edge_type_candidates else None
     if edge_model is not None and len(edge_model.model_fields) != 0:
         edge_attributes_context = {
@@ -917,7 +925,18 @@ async def resolve_extracted_edge(
         resolved_edge.attributes = {}
     if kept:
         # Caller-owned properties survive the recompute/clear above and the full-replace save.
-        resolved_edge.attributes = {**kept, **resolved_edge.attributes}
+        # Only a schema field the recomputation produced beats the stored value: the attribute
+        # LLM may echo (or null) any existing key it was shown.
+        schema_fields = set(edge_model.model_fields) if edge_model is not None else set()
+        recomputed = resolved_edge.attributes
+        resolved_edge.attributes = {
+            **recomputed,
+            **{
+                key: value
+                for key, value in kept.items()
+                if key not in schema_fields or key not in recomputed
+            },
+        }
     resolved_edge._attributes_resolved = True
 
     # Extract timestamps for new edges (duplicated edges retain their existing timestamps)

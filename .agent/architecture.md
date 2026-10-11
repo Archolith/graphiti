@@ -314,10 +314,16 @@ an edge schema or clears them to `{}`, which used to drop properties a caller st
 Graphiti (Menhir's anchored-time contract and world-end stamp). `Graphiti(preserved_edge_attributes=
 ...)` names such keys; `resolve_extracted_edge(preserved_attributes=...)` captures their values
 before the recompute/clear and restores them before the edge-expiry hook runs, so the hook
-sees them and the save keeps them. A key the schema produced keeps the recomputed value. The
-early-return and fast paths are unchanged. Threaded through `resolve_extracted_edges`,
-`dedupe_edges_bulk` and every `Graphiti` resolver call (AST-checked); empty by default, in
-which case calls keep the legacy shape (`tests/test_preserved_edge_attributes.py`).
+sees them and the save keeps them. Only on a duplicate (a new edge clears as upstream). Only a
+schema field the recomputation produced beats the stored value; any other preserved key keeps
+it even if the attribute LLM echoed or nulled it. The stored value also wins over a value the
+incoming edge carried. Values are kept verbatim: a preserved stamp survives a later
+contradiction that truncates `invalid_at`, so a reader must check it against the edge (Menhir's
+hook requires `time_world_end == invalid_at`). The early-return and fast paths are unchanged.
+Threaded through `resolve_extracted_edges`, `dedupe_edges_bulk` and every `Graphiti` resolver
+call (AST-checked); empty by default, in which case calls keep the legacy shape
+(`tests/test_preserved_edge_attributes.py`). Constructor validation runs before any driver is
+created.
 
 ## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
 

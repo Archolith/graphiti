@@ -404,3 +404,227 @@ def test_graphiti_rejects_invalid_preserved_attributes(value):
 
 def test_graphiti_class_default_is_empty():
     assert object.__new__(Graphiti).preserved_edge_attributes == frozenset()
+
+
+# --- review fixes: echo, new edge, None attributes ------------------------------------------
+
+
+def _llm_with(attribute_response: dict, duplicate_facts: list[int] | None = None) -> MagicMock:
+    """LLM answering the attribute prompt with ``attribute_response`` verbatim."""
+    duplicates = [0] if duplicate_facts is None else duplicate_facts
+
+    async def generate_response(messages, **kwargs):
+        if kwargs.get('prompt_name') == 'extract_edges.extract_attributes':
+            return dict(attribute_response)
+        return {'duplicate_facts': duplicates, 'contradicted_facts': []}
+
+    llm = MagicMock()
+    llm.generate_response = AsyncMock(side_effect=generate_response)
+    return llm
+
+
+@pytest.mark.parametrize('echoed', [None, '2024-04-01'])
+async def test_attribute_llm_echo_never_overrides_a_non_schema_preserved_key(echoed):
+    """Fails if a preserved key outside the schema takes the recomputed (echoed) value."""
+    resolved, _, _ = await _resolve(
+        _llm_with({'rating': 2, 'time_world_end': echoed}),
+        _edge(PARAPHRASE),
+        _stored(),
+        schema=True,
+        preserved_attributes=PRESERVED,
+    )
+
+    assert resolved.attributes['time_world_end'] == WORLD_END
+    assert resolved.attributes['time_expiry'] == 'world_end'
+    assert resolved.attributes['rating'] == 2
+
+
+async def test_a_preserved_schema_field_missing_from_the_recompute_keeps_the_stored_value():
+    """apply_capped_attributes uses replace mode: a field the LLM omits is simply absent from
+    the recomputed attributes, so the stored value must be restored."""
+    stored = _stored(attributes={'rating': 1, 'scratch': 1})
+
+    resolved, _, _ = await _resolve(
+        _llm_with({}),
+        _edge(PARAPHRASE),
+        stored,
+        schema=True,
+        preserved_attributes=frozenset({'rating'}),
+    )
+
+    assert resolved.attributes == {'rating': 1}
+
+
+async def test_a_new_edge_does_not_inherit_preserved_keys():
+    """No duplicate: the extracted edge is resolved, upstream clear applies, nothing restored."""
+    new = _edge(PARAPHRASE, attributes={'time_expiry': 'world_end', 'scratch': 1})
+
+    resolved, _, _ = await _resolve(
+        _llm_with({}, duplicate_facts=[]),
+        new,
+        _stored(),
+        preserved_attributes=frozenset({'time_expiry'}),
+    )
+
+    assert resolved is new
+    assert resolved.attributes == {}
+
+
+@pytest.mark.parametrize('preserved', [frozenset(), PRESERVED])
+async def test_a_stored_edge_with_none_attributes_does_not_crash(preserved):
+    stored = _stored()
+    object.__setattr__(stored, 'attributes', None)
+    assert stored.attributes is None
+
+    resolved, _, _ = await _resolve(
+        _llm(), _edge(PARAPHRASE), stored, preserved_attributes=preserved
+    )
+
+    assert resolved is stored
+    assert resolved.attributes == {}
+
+
+# --- review fixes: strict call-site guard ---------------------------------------------------
+
+
+def _passes_self_preserved(call: ast.Call) -> bool:
+    """True when a call spreads ``preserved_attributes_kwargs(self.preserved_edge_attributes)``."""
+    for keyword in call.keywords:
+        value = keyword.value
+        if not (
+            keyword.arg is None
+            and isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == 'preserved_attributes_kwargs'
+        ):
+            continue
+        if len(value.args) != 1 or value.keywords:
+            continue
+        arg = value.args[0]
+        if (
+            isinstance(arg, ast.Attribute)
+            and arg.attr == 'preserved_edge_attributes'
+            and isinstance(arg.value, ast.Name)
+            and arg.value.id == 'self'
+        ):
+            return True
+    return False
+
+
+def test_every_graphiti_resolver_call_passes_exactly_the_instance_option():
+    tree = ast.parse(Path(graphiti_module.__file__).read_text(encoding='utf-8'))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_name(node.func) in _RESOLVER_CALLS
+    ]
+
+    assert len(calls) >= 4
+    assert [call.lineno for call in calls if not _passes_self_preserved(call)] == []
+
+
+@pytest.mark.parametrize(
+    'source',
+    [
+        'f(a, **preserved_attributes_kwargs(frozenset()))',
+        'f(a, **preserved_attributes_kwargs(self.x))',
+        'f(a, **preserved_attributes_kwargs(other.preserved_edge_attributes))',
+        'f(a, **preserved_attributes_kwargs())',
+        'f(a, **edge_expiry_kwargs(self.preserved_edge_attributes))',
+        'f(a, preserved_attributes=self.preserved_edge_attributes)',
+    ],
+)
+def test_the_strict_guard_rejects_wrong_arguments(source):
+    call = ast.parse(source).body[0].value  # type: ignore[attr-defined]
+
+    assert not _passes_self_preserved(call)
+
+
+def test_the_strict_guard_accepts_the_instance_option():
+    source = 'f(a, **preserved_attributes_kwargs(self.preserved_edge_attributes))'
+    call = ast.parse(source).body[0].value  # type: ignore[attr-defined]
+
+    assert _passes_self_preserved(call)
+
+
+# --- review fixes: constructor ---------------------------------------------------------------
+
+
+def test_graphiti_accepts_a_generator_of_names():
+    graphiti = _make_graphiti(preserved_edge_attributes=(name for name in ['a', 'b']))
+
+    assert graphiti.preserved_edge_attributes == frozenset({'a', 'b'})
+
+
+@pytest.mark.parametrize('value', ['  ', ['  '], ['a', ' ']])
+def test_graphiti_rejects_whitespace_only_names(value):
+    with pytest.raises(TypeError):
+        _make_graphiti(preserved_edge_attributes=value)
+
+
+@pytest.mark.parametrize('value', ['abc', [1]])
+def test_invalid_preserved_attributes_fail_before_any_driver_is_created(monkeypatch, value):
+    driver_class = Mock()
+    monkeypatch.setattr(graphiti_module, 'Neo4jDriver', driver_class)
+
+    with pytest.raises(TypeError):
+        Graphiti(
+            uri='bolt://x',
+            user='u',
+            password='p',
+            llm_client=Mock(spec=LLMClient),
+            embedder=Mock(spec=EmbedderClient),
+            cross_encoder=Mock(spec=CrossEncoderClient),
+            preserved_edge_attributes=value,
+        )
+
+    driver_class.assert_not_called()
+
+
+# --- review fixes: cross-episode bulk --------------------------------------------------------
+
+
+@pytest.mark.parametrize('paraphrase_first', [True, False])
+async def test_bulk_episodes_keep_the_preserved_keys_on_every_copy(monkeypatch, paraphrase_first):
+    """add_episode_bulk: one episode paraphrases the stored edge, another states it exactly.
+    Real per-episode resolution and cross-episode reconcile; both copies keep the stamp."""
+
+    async def fake_search(clients, query, group_ids, config, search_filter):
+        return SearchResults(edges=[_stored()])
+
+    monkeypatch.setattr(edge_ops, 'search', fake_search)
+    monkeypatch.setattr(
+        graphiti_module, 'resolve_extracted_nodes', AsyncMock(return_value=([], {}))
+    )
+    monkeypatch.setattr(
+        graphiti_module, 'extract_attributes_from_nodes', AsyncMock(return_value=NODES)
+    )
+    clients = SimpleNamespace(
+        driver=MagicMock(), llm_client=_llm(), embedder=MagicMock(), cross_encoder=MagicMock()
+    )
+    episodes = [_episode(1), _episode(2)]
+    first, second = _edge(PARAPHRASE), _edge(STORED_FACT)
+    if not paraphrase_first:
+        first, second = second, first
+
+    graphiti = object.__new__(Graphiti)
+    graphiti.clients = clients  # type: ignore[assignment]
+    graphiti.edge_expiry_hook = None
+    graphiti.identity_gate_hook = None
+    graphiti.candidate_filter_hook = None
+    graphiti.node_pre_resolution_hook = None
+    graphiti.preserved_edge_attributes = PRESERVED
+
+    _, resolved, invalidated, _ = await graphiti._resolve_nodes_and_edges_bulk(
+        {episode.uuid: [] for episode in episodes},
+        {'episode_1': [first], 'episode_2': [second]},
+        [(episode, []) for episode in episodes],
+        None,
+        {},
+        {},
+        episodes,
+    )
+
+    copies = [edge for edge in resolved + invalidated if edge.uuid == STORED_UUID]
+    assert len(copies) == 2
+    assert [edge.attributes for edge in copies] == [KEPT, KEPT]
