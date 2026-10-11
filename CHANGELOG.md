@@ -5,6 +5,21 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.30.2.post6 — 2026-10-10
+
+Maintenance release on the same upstream Graphiti 0.30.2 base.
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.30.2.post6) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.30.2.post6/)
+
+### Added
+
+- `Graphiti(preserved_edge_attributes=...)`: edge property names a caller keeps on
+  stored edges. When a paraphrased fact resolves to a stored edge, the named values
+  survive the attribute recomputation (or clearing) and are visible to the
+  edge-expiry hook. A schema field the recomputation produced still wins. Default
+  is empty, which keeps current behavior
+  ([#11](https://github.com/Archolith/graphiti/pull/11)).
+
 ## 0.30.2.post5 — 2026-10-10
 
 Maintenance release on the same upstream Graphiti 0.30.2 base.
