@@ -31,6 +31,8 @@ OWN_END = datetime(2024, 4, 1, tzinfo=timezone.utc)
 TRUNCATED = datetime(2024, 3, 28, tzinfo=timezone.utc)
 EXPIRED = datetime(2024, 4, 5, tzinfo=timezone.utc)
 LATER_EXPIRED = datetime(2024, 4, 9, tzinfo=timezone.utc)
+EARLIER_EXPIRED = datetime(2024, 4, 3, tzinfo=timezone.utc)
+EARLIER_END = datetime(2024, 3, 20, tzinfo=timezone.utc)
 EMBEDDING = [0.1, 0.2, 0.3]
 
 
@@ -132,7 +134,7 @@ async def test_stale_live_save_keeps_the_stored_expiry(driver, group, save) -> N
 
 @SAVES
 @pytest.mark.asyncio
-async def test_saves_that_carry_an_expiry_are_unchanged(driver, group, save) -> None:
+async def test_live_to_expired_is_written_as_given(driver, group, save) -> None:
     user, rome = await _nodes(driver, group)
     live = _edge(user, rome)
     await save(live, driver)
@@ -140,18 +142,72 @@ async def test_saves_that_carry_an_expiry_are_unchanged(driver, group, save) -> 
     assert props.get('expired_at') is None and props['invalid_at'] == OWN_END
     assert '_graphiti_save_lock' not in props
 
-    await save(_expired_copy(live), driver)  # live -> expired: written as given
+    await save(_expired_copy(live), driver)
     props = await _stored(driver, live.uuid)
     assert (props['expired_at'], props['invalid_at']) == (EXPIRED, TRUNCATED)
 
-    # expired -> expired: last writer wins, as before
-    await save(live.model_copy(update={'invalid_at': OWN_END, 'expired_at': LATER_EXPIRED}), driver)
-    props = await _stored(driver, live.uuid)
-    assert (props['expired_at'], props['invalid_at']) == (LATER_EXPIRED, OWN_END)
 
-
+@SAVES
+@pytest.mark.parametrize(
+    ('incoming', 'kept'),
+    [
+        # A's stale copy expired by A itself (own end): B's earlier truncation still wins
+        ({'invalid_at': OWN_END, 'expired_at': LATER_EXPIRED}, (EXPIRED, TRUNCATED)),
+        # an earlier end or an earlier expiry from the incoming save wins, field by field
+        ({'invalid_at': EARLIER_END, 'expired_at': LATER_EXPIRED}, (EXPIRED, EARLIER_END)),
+        ({'invalid_at': OWN_END, 'expired_at': EARLIER_EXPIRED}, (EARLIER_EXPIRED, TRUNCATED)),
+        ({'invalid_at': None, 'expired_at': LATER_EXPIRED}, (EXPIRED, TRUNCATED)),
+    ],
+    ids=['own-end-later', 'earlier-end', 'earlier-expiry', 'no-end'],
+)
 @pytest.mark.asyncio
-async def test_live_save_waits_for_a_concurrent_expiry_and_keeps_it(driver, group) -> None:
+async def test_stored_expiry_keeps_the_earliest_values(driver, group, save, incoming, kept) -> None:
+    user, rome = await _nodes(driver, group)
+    live = _edge(user, rome)
+    await save(_expired_copy(live), driver)  # stored: B's truncation and expiry
+
+    await save(live.model_copy(update=incoming), driver)
+
+    props = await _stored(driver, live.uuid)
+    assert (props['expired_at'], props.get('invalid_at')) == kept
+
+
+@SAVES
+@pytest.mark.asyncio
+async def test_stored_expiry_without_an_end_takes_the_incoming_end(driver, group, save) -> None:
+    user, rome = await _nodes(driver, group)
+    live = _edge(user, rome)
+    await save(live.model_copy(update={'invalid_at': None, 'expired_at': EXPIRED}), driver)
+
+    await save(live, driver)  # stale live copy with its own end
+
+    props = await _stored(driver, live.uuid)
+    assert (props['expired_at'], props['invalid_at']) == (EXPIRED, OWN_END)
+
+
+@pytest.mark.parametrize('order', ['stale-first', 'expiring-first'])
+@pytest.mark.asyncio
+async def test_bulk_batch_with_copies_of_an_expired_edge_stays_expired(
+    driver, group, order
+) -> None:
+    # Graphiti reconciles copies before a bulk save; unreconciled copies in one batch still never
+    # make the stored expired edge live (the stored values are read before the batch writes).
+    user, rome = await _nodes(driver, group)
+    live = _edge(user, rome)
+    await _save_single(_expired_copy(live), driver)
+    expiring = live.model_copy(update={'invalid_at': EARLIER_END, 'expired_at': LATER_EXPIRED})
+    batch = [live, expiring] if order == 'stale-first' else [expiring, live]
+
+    await Neo4jEntityEdgeOperations().save_bulk(driver, batch)
+
+    props = await _stored(driver, live.uuid)
+    assert props['expired_at'] == EXPIRED
+    assert props['invalid_at'] in (EARLIER_END, TRUNCATED)
+
+
+@SAVES
+@pytest.mark.asyncio
+async def test_live_save_waits_for_a_concurrent_expiry_and_keeps_it(driver, group, save) -> None:
     # B holds an uncommitted expiry. A's save must take the lock before reading the stored
     # expiry; reading first would see the pre-B value and write the edge back live.
     user, rome = await _nodes(driver, group)
@@ -167,7 +223,7 @@ async def test_live_save_waits_for_a_concurrent_expiry_and_keeps_it(driver, grou
             expired_at=EXPIRED,
             invalid_at=TRUNCATED,
         )
-        stale_save = asyncio.create_task(live.save(driver))
+        stale_save = asyncio.create_task(save(live, driver))
         await asyncio.sleep(1.5)
         assert not stale_save.done(), 'the save did not wait for the uncommitted expiry'
         await tx.commit()

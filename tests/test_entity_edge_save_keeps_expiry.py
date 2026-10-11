@@ -27,8 +27,10 @@ def test_lock_then_read_then_replace_then_restore(row, query) -> None:
         'SET e._graphiti_save_lock = true',
         'e.expired_at AS stored_expired_at, e.invalid_at AS stored_invalid_at',
         f'SET e = {row}\n',
-        f'WHEN stored_expired_at IS NOT NULL AND {row}.expired_at IS NULL',
-        'SET e.expired_at = stored_expired_at, e.invalid_at = stored_invalid_at)',
+        'CASE WHEN stored_expired_at IS NOT NULL THEN [1] ELSE [] END',
+        f'WHEN {row}.expired_at IS NULL OR stored_expired_at < {row}.expired_at',
+        f'WHEN {row}.invalid_at IS NULL',
+        f'(stored_invalid_at IS NOT NULL AND stored_invalid_at < {row}.invalid_at)',
         'RETURN ',
     ]
     positions = [query.find(part) for part in order]
@@ -37,7 +39,7 @@ def test_lock_then_read_then_replace_then_restore(row, query) -> None:
     assert query.count('SET e = ') == 1
     vector = query.find('setRelationshipVectorProperty')
     if vector >= 0:
-        assert vector > positions[5]
+        assert vector > positions[-2]
 
 
 @pytest.mark.parametrize(

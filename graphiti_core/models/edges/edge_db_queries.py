@@ -60,17 +60,24 @@ EPISODIC_EDGE_RETURN = """
 """
 
 
-# Full-replace save of a Neo4j entity edge that never makes a stored expired edge live again.
-# A writer that fetched the edge before another writer expired it would otherwise save it back
-# with expired_at null. The lock write comes first so the stored values read next are the latest
-# committed ones (read committed); the full replace then drops the lock property.
+# Full-replace save of a Neo4j entity edge that never undoes a stored expiry. A writer that
+# fetched the edge before another writer expired it would otherwise save it back live, or with a
+# later end. Once the stored edge is expired, the save keeps the earliest expired_at and the
+# earliest non-null invalid_at (the reconcile_edge_copies rule). The lock write comes first so
+# the stored values read next are the latest committed ones (read committed); the full replace
+# then drops the lock property.
 _NEO4J_KEEP_STORED_EXPIRY = """
                 SET e._graphiti_save_lock = true
                 WITH e{carry}, e.expired_at AS stored_expired_at, e.invalid_at AS stored_invalid_at
                 SET e = {row}
-                FOREACH (keep IN CASE WHEN stored_expired_at IS NOT NULL AND {row}.expired_at IS NULL
-                                   THEN [1] ELSE [] END |
-                    SET e.expired_at = stored_expired_at, e.invalid_at = stored_invalid_at)
+                FOREACH (keep IN CASE WHEN stored_expired_at IS NOT NULL THEN [1] ELSE [] END |
+                    SET e.expired_at = CASE
+                            WHEN {row}.expired_at IS NULL OR stored_expired_at < {row}.expired_at
+                            THEN stored_expired_at ELSE {row}.expired_at END,
+                        e.invalid_at = CASE
+                            WHEN {row}.invalid_at IS NULL
+                                OR (stored_invalid_at IS NOT NULL AND stored_invalid_at < {row}.invalid_at)
+                            THEN stored_invalid_at ELSE {row}.invalid_at END)
 """
 
 
