@@ -5,6 +5,20 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.30.2.post7 — 2026-10-11
+
+Maintenance release on the same upstream Graphiti 0.30.2 base.
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.30.2.post7) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.30.2.post7/)
+
+### Fixed
+
+- Neo4j: saving an entity edge never undoes a stored expiry. A writer that fetched an
+  edge before another writer expired it used to save it back live (or with a later
+  end). Once the stored edge is expired, a save keeps the earliest `expired_at` and
+  the earliest non-null `invalid_at`. Other providers are unchanged
+  ([#13](https://github.com/Archolith/graphiti/pull/13)).
+
 ## 0.30.2.post6 — 2026-10-10
 
 Maintenance release on the same upstream Graphiti 0.30.2 base.
