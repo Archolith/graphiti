@@ -307,6 +307,18 @@ or fact is not copies of one edge; it is logged and left alone. `add_triplet` is
 reconciled: an update by an existing uuid can meet its own stored copy among the
 invalidation candidates (upstream behavior, not changed here).
 
+Caller-preserved edge attributes: a fetched stored edge carries every row property in
+`attributes` (`properties(e) AS attributes`), and `EntityEdge.save` writes `attributes` back as
+a full replace. On the LLM duplicate path `resolve_extracted_edge` recomputes attributes from
+an edge schema or clears them to `{}`, which used to drop properties a caller stores outside
+Graphiti (Menhir's anchored-time contract and world-end stamp). `Graphiti(preserved_edge_attributes=
+...)` names such keys; `resolve_extracted_edge(preserved_attributes=...)` captures their values
+before the recompute/clear and restores them before the edge-expiry hook runs, so the hook
+sees them and the save keeps them. A key the schema produced keeps the recomputed value. The
+early-return and fast paths are unchanged. Threaded through `resolve_extracted_edges`,
+`dedupe_edges_bulk` and every `Graphiti` resolver call (AST-checked); empty by default, in
+which case calls keep the legacy shape (`tests/test_preserved_edge_attributes.py`).
+
 ## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
 
 `node_operations._extract_entity_attributes` is the single boundary where node attributes

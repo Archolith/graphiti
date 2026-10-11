@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime
 from time import time
 from typing import Any
@@ -104,6 +105,7 @@ from graphiti_core.utils.maintenance.community_operations import (
 from graphiti_core.utils.maintenance.edge_operations import (
     build_episodic_edges,
     extract_edges,
+    preserved_attributes_kwargs,
     reconcile_edge_copies,
     resolve_extracted_edge,
     resolve_extracted_edges,
@@ -156,6 +158,7 @@ class Graphiti:
     candidate_filter_hook: CandidateFilterHook | None = None
     node_pre_resolution_hook: NodePreResolutionHook | None = None
     edge_expiry_hook: EdgeExpiryHook | None = None
+    preserved_edge_attributes: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -175,6 +178,7 @@ class Graphiti:
         candidate_filter_hook: CandidateFilterHook | None = None,
         node_pre_resolution_hook: NodePreResolutionHook | None = None,
         edge_expiry_hook: EdgeExpiryHook | None = None,
+        preserved_edge_attributes: Iterable[str] | None = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -245,6 +249,10 @@ class Graphiti:
             own ``invalid_at``, whether that end expires the edge (upstream) or is
             the fact's world-time end. See :mod:`graphiti_core.edge_expiry`. When
             absent, edge expiry is unchanged.
+        preserved_edge_attributes : Iterable[str] | None, optional
+            Names of edge properties a caller stores outside Graphiti. On a resolved
+            duplicate they keep their stored values when resolution recomputes or
+            clears attributes, so the edge save does not drop them.
 
         Returns
         -------
@@ -319,6 +327,23 @@ class Graphiti:
 
         # Optional edge-expiry extension hook for an edge's own end (neutral; no policy)
         self.edge_expiry_hook = edge_expiry_hook
+
+        # Caller-owned edge properties kept across duplicate resolution (neutral; no policy)
+        if preserved_edge_attributes is None:
+            self.preserved_edge_attributes = frozenset()
+        else:
+            if isinstance(preserved_edge_attributes, (str, bytes)):
+                raise TypeError(
+                    'preserved_edge_attributes must be an iterable of property names, not a string'
+                )
+            preserved_names = list(preserved_edge_attributes)
+            for name in preserved_names:
+                if not isinstance(name, str) or not name:
+                    raise TypeError(
+                        'preserved_edge_attributes entries must be non-empty str, '
+                        f'got {type(name).__name__}'
+                    )
+            self.preserved_edge_attributes = frozenset(preserved_names)
 
         # Capture telemetry event
         self._capture_initialization_telemetry()
@@ -868,6 +893,7 @@ class Graphiti:
             edge_types or {},
             edge_type_map,
             **edge_expiry_kwargs(self.edge_expiry_hook),
+            **preserved_attributes_kwargs(self.preserved_edge_attributes),
         )
 
         return resolved_edges, invalidated_edges, new_edges
@@ -1143,6 +1169,7 @@ class Graphiti:
                     edge_types or {},
                     edge_type_map,
                     **edge_expiry_kwargs(self.edge_expiry_hook),
+                    **preserved_attributes_kwargs(self.preserved_edge_attributes),
                 )
                 for episode in episodes
             ]
@@ -1674,6 +1701,7 @@ class Graphiti:
                     edge_types or {},
                     edge_type_map or edge_type_map_default,
                     **edge_expiry_kwargs(self.edge_expiry_hook),
+                    **preserved_attributes_kwargs(self.preserved_edge_attributes),
                 )
 
                 # Resolve nodes and edges against the existing graph
@@ -2066,6 +2094,7 @@ class Graphiti:
             ),
             None,
             **edge_expiry_kwargs(self.edge_expiry_hook),
+            **preserved_attributes_kwargs(self.preserved_edge_attributes),
         )
 
         edges: list[EntityEdge] = [resolved_edge] + invalidated_edges
