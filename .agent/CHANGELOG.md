@@ -1,5 +1,12 @@
 # Changelog — graphiti
 
+## 2026-10-10 — Release prep for `v0.30.2.post6`
+
+- `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
+  wheel version check), `README.md`, `CHANGELOG.md`: bump the published version to `0.30.2.post6`, which carries
+  #11 (caller-preserved edge attributes) from `menhir/main` @ `8c2f0b5`. Tag
+  `v0.30.2.post6` on the merged release-prep commit triggers the PyPI release.
+
 ## 2026-10-10 — Caller-preserved edge attributes
 
 - `graphiti_core/graphiti.py`: `Graphiti(preserved_edge_attributes=...)` (iterable of property
