@@ -1,5 +1,21 @@
 # Changelog — graphiti
 
+## 2026-10-10 — Caller-preserved edge attributes
+
+- `graphiti_core/graphiti.py`: `Graphiti(preserved_edge_attributes=...)` (iterable of property
+  names, stored as a frozenset; a string or a non-str/blank entry is a `TypeError`, checked
+  before any driver is created), threaded to every resolver call with
+  `preserved_attributes_kwargs`.
+- `graphiti_core/utils/maintenance/edge_operations.py`: `resolve_extracted_edge` and
+  `resolve_extracted_edges` take `preserved_attributes`; on the LLM duplicate path the named
+  keys keep their stored values when attributes are recomputed or cleared, before the
+  edge-expiry hook. Only a schema field the recomputation produced overrides one (the attribute
+  LLM may echo or null other keys); a new edge is unaffected.
+  `graphiti_core/utils/bulk_utils.py`: `dedupe_edges_bulk` passes it.
+- Review: `.agent/reviews/graphiti-preserved-edge-attributes-pr11-review.md` in the workspace.
+- `tests/test_preserved_edge_attributes.py`: NEW; added to `menhir-compatibility.yml`.
+  Motivation: Menhir anchored-time P3c (a restatement must not drop the contract and stamp).
+
 ## 2026-10-10 — Release prep for `v0.30.2.post5`
 
 - `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed

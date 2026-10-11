@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime
 from time import time
 from typing import Any
@@ -104,6 +105,7 @@ from graphiti_core.utils.maintenance.community_operations import (
 from graphiti_core.utils.maintenance.edge_operations import (
     build_episodic_edges,
     extract_edges,
+    preserved_attributes_kwargs,
     reconcile_edge_copies,
     resolve_extracted_edge,
     resolve_extracted_edges,
@@ -148,6 +150,24 @@ class AddTripletResults(BaseModel):
     edges: list[EntityEdge]
 
 
+def _preserved_edge_attribute_names(value: Iterable[str] | None) -> frozenset[str]:
+    """Validate ``Graphiti(preserved_edge_attributes=...)`` and return it as a frozenset."""
+    if value is None:
+        return frozenset()
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(
+            'preserved_edge_attributes must be an iterable of property names, not a string'
+        )
+    names = list(value)
+    for name in names:
+        if not isinstance(name, str) or not name.strip():
+            raise TypeError(
+                'preserved_edge_attributes entries must be non-blank str, '
+                f'got {type(name).__name__} {name!r}'
+            )
+    return frozenset(names)
+
+
 class Graphiti:
     # Class-level default so instances that bypass __init__ (subclasses, test
     # doubles, unpickled-style instances) safely observe "no hook configured" and
@@ -156,6 +176,7 @@ class Graphiti:
     candidate_filter_hook: CandidateFilterHook | None = None
     node_pre_resolution_hook: NodePreResolutionHook | None = None
     edge_expiry_hook: EdgeExpiryHook | None = None
+    preserved_edge_attributes: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -175,6 +196,7 @@ class Graphiti:
         candidate_filter_hook: CandidateFilterHook | None = None,
         node_pre_resolution_hook: NodePreResolutionHook | None = None,
         edge_expiry_hook: EdgeExpiryHook | None = None,
+        preserved_edge_attributes: Iterable[str] | None = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -245,6 +267,10 @@ class Graphiti:
             own ``invalid_at``, whether that end expires the edge (upstream) or is
             the fact's world-time end. See :mod:`graphiti_core.edge_expiry`. When
             absent, edge expiry is unchanged.
+        preserved_edge_attributes : Iterable[str] | None, optional
+            Names of edge properties a caller stores outside Graphiti. On a resolved
+            duplicate they keep their stored values when resolution recomputes or
+            clears attributes, so the edge save does not drop them.
 
         Returns
         -------
@@ -264,6 +290,9 @@ class Graphiti:
         Make sure to set the OPENAI_API_KEY environment variable before initializing
         Graphiti if you're using the default OpenAIClient.
         """
+
+        # Validate before any driver or client is created, so a bad value leaks nothing.
+        preserved_names = _preserved_edge_attribute_names(preserved_edge_attributes)
 
         if graph_driver:
             self.driver = graph_driver
@@ -319,6 +348,9 @@ class Graphiti:
 
         # Optional edge-expiry extension hook for an edge's own end (neutral; no policy)
         self.edge_expiry_hook = edge_expiry_hook
+
+        # Caller-owned edge properties kept across duplicate resolution (neutral; no policy)
+        self.preserved_edge_attributes = preserved_names
 
         # Capture telemetry event
         self._capture_initialization_telemetry()
@@ -868,6 +900,7 @@ class Graphiti:
             edge_types or {},
             edge_type_map,
             **edge_expiry_kwargs(self.edge_expiry_hook),
+            **preserved_attributes_kwargs(self.preserved_edge_attributes),
         )
 
         return resolved_edges, invalidated_edges, new_edges
@@ -1143,6 +1176,7 @@ class Graphiti:
                     edge_types or {},
                     edge_type_map,
                     **edge_expiry_kwargs(self.edge_expiry_hook),
+                    **preserved_attributes_kwargs(self.preserved_edge_attributes),
                 )
                 for episode in episodes
             ]
@@ -1674,6 +1708,7 @@ class Graphiti:
                     edge_types or {},
                     edge_type_map or edge_type_map_default,
                     **edge_expiry_kwargs(self.edge_expiry_hook),
+                    **preserved_attributes_kwargs(self.preserved_edge_attributes),
                 )
 
                 # Resolve nodes and edges against the existing graph
@@ -2066,6 +2101,7 @@ class Graphiti:
             ),
             None,
             **edge_expiry_kwargs(self.edge_expiry_hook),
+            **preserved_attributes_kwargs(self.preserved_edge_attributes),
         )
 
         edges: list[EntityEdge] = [resolved_edge] + invalidated_edges

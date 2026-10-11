@@ -17,6 +17,7 @@ limitations under the License.
 import logging
 from datetime import datetime
 from time import time
+from typing import Any
 
 from pydantic import BaseModel
 from typing_extensions import LiteralString
@@ -329,6 +330,11 @@ async def extract_edges(
     return edges
 
 
+def preserved_attributes_kwargs(preserved: frozenset[str]) -> dict[str, Any]:
+    """Return resolve kwargs for ``preserved``; empty when unset to keep the legacy call shape."""
+    return {'preserved_attributes': preserved} if preserved else {}
+
+
 async def resolve_extracted_edges(
     clients: GraphitiClients,
     extracted_edges: list[EntityEdge],
@@ -338,11 +344,14 @@ async def resolve_extracted_edges(
     edge_type_map: dict[tuple[str, str], list[str]],
     existing_edges_override: list[EntityEdge] | None = None,
     edge_expiry_hook: EdgeExpiryHook | None = None,
+    preserved_attributes: frozenset[str] = frozenset(),
 ) -> tuple[list[EntityEdge], list[EntityEdge], list[EntityEdge]]:
     """Resolve extracted edges against existing graph context.
 
     ``edge_expiry_hook`` is passed to every ``resolve_extracted_edge`` call; see
-    :mod:`graphiti_core.edge_expiry`.
+    :mod:`graphiti_core.edge_expiry`. ``preserved_attributes`` names caller-owned edge
+    properties that keep their stored values on a resolved duplicate; it is passed to
+    every ``resolve_extracted_edge`` call as well.
 
     Returns
     -------
@@ -519,6 +528,7 @@ async def resolve_extracted_edges(
                     episode,
                     extracted_edge_types,
                     **edge_expiry_kwargs(edge_expiry_hook),
+                    **preserved_attributes_kwargs(preserved_attributes),
                 )
                 for extracted_edge, related_edges, existing_edges, extracted_edge_types in zip(
                     extracted_edges,
@@ -713,6 +723,7 @@ async def resolve_extracted_edge(
     episode: EpisodicNode,
     edge_type_candidates: dict[str, type[BaseModel]] | None = None,
     edge_expiry_hook: EdgeExpiryHook | None = None,
+    preserved_attributes: frozenset[str] = frozenset(),
 ) -> tuple[EntityEdge, list[EntityEdge], list[EntityEdge]]:
     """Resolve an extracted edge against existing graph context.
 
@@ -733,6 +744,11 @@ async def resolve_extracted_edge(
     edge_expiry_hook : EdgeExpiryHook | None
         Optional hook deciding whether the resolved edge's own ``invalid_at`` expires it.
         See :mod:`graphiti_core.edge_expiry`. When absent, upstream behavior.
+    preserved_attributes : frozenset[str]
+        Names of edge properties stored by the caller outside Graphiti. On the LLM
+        duplicate path they keep their stored values when attributes are recomputed
+        or cleared, so the edge save does not drop them; only a schema field the
+        recomputation produced overrides one. A new (non-duplicate) edge is unaffected.
 
     Returns
     -------
@@ -867,6 +883,16 @@ async def resolve_extracted_edge(
 
     # Only extract structured attributes if the edge's relation_type matches an allowed custom type
     # AND the edge model exists for this node pair signature
+    # Stored values of caller-owned keys on a duplicate; a new edge clears as upstream.
+    kept = (
+        {
+            key: value
+            for key, value in (resolved_edge.attributes or {}).items()
+            if key in preserved_attributes
+        }
+        if preserved_attributes and resolved_edge is not extracted_edge
+        else {}
+    )
     edge_model = edge_type_candidates.get(resolved_edge.name) if edge_type_candidates else None
     if edge_model is not None and len(edge_model.model_fields) != 0:
         edge_attributes_context = {
@@ -897,6 +923,20 @@ async def resolve_extracted_edge(
         # No matching edge schema → no structured attributes apply; clear any stale
         # attributes left from a prior schema. Intentionally not merged.
         resolved_edge.attributes = {}
+    if kept:
+        # Caller-owned properties survive the recompute/clear above and the full-replace save.
+        # Only a schema field the recomputation produced beats the stored value: the attribute
+        # LLM may echo (or null) any existing key it was shown.
+        schema_fields = set(edge_model.model_fields) if edge_model is not None else set()
+        recomputed = resolved_edge.attributes
+        resolved_edge.attributes = {
+            **recomputed,
+            **{
+                key: value
+                for key, value in kept.items()
+                if key not in schema_fields or key not in recomputed
+            },
+        }
     resolved_edge._attributes_resolved = True
 
     # Extract timestamps for new edges (duplicated edges retain their existing timestamps)

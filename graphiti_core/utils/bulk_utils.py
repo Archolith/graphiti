@@ -54,6 +54,7 @@ from graphiti_core.utils.maintenance.dedup_helpers import (
 )
 from graphiti_core.utils.maintenance.edge_operations import (
     extract_edges,
+    preserved_attributes_kwargs,
     resolve_extracted_edge,
 )
 from graphiti_core.utils.maintenance.graph_data_operations import (
@@ -536,6 +537,7 @@ async def dedupe_edges_bulk(
     edge_types: dict[str, type[BaseModel]],
     _edge_type_map: dict[tuple[str, str], list[str]],
     edge_expiry_hook: EdgeExpiryHook | None = None,
+    preserved_attributes: frozenset[str] = frozenset(),
 ) -> dict[str, list[EntityEdge]]:
     embedder = clients.embedder
     min_score = 0.6
@@ -595,6 +597,7 @@ async def dedupe_edges_bulk(
                 episode,
                 edge_types,
                 **edge_expiry_kwargs(edge_expiry_hook),
+                **preserved_attributes_kwargs(preserved_attributes),
             )
             for episode, edge, candidates in dedupe_tuples
         ]
