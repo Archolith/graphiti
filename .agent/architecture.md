@@ -325,6 +325,26 @@ call (AST-checked); empty by default, in which case calls keep the legacy shape
 (`tests/test_preserved_edge_attributes.py`). Constructor validation runs before any driver is
 created.
 
+Stored expiry survives a stale save (Neo4j only): the entity-edge save is a full replace of the
+copy a writer fetched, so a writer that fetched an edge before another writer expired it used to
+save it back live (`expired_at` null, its own `invalid_at`). The Neo4j single and bulk save
+queries (`_NEO4J_KEEP_STORED_EXPIRY` in `models/edges/edge_db_queries.py`) first write a lock
+property, then read the stored `expired_at`/`invalid_at`, then replace. Once the stored edge is
+expired, every save keeps the earliest `expired_at` and the earliest non-null `invalid_at` (the
+`reconcile_edge_copies` rule), so a stale live save cannot revive it and a stale expiring save
+cannot move a truncated end later. Taking the lock before the read makes the read see a
+concurrent expiry that committed while the save waited (read committed). Graphiti never clears
+`expired_at` on purpose, so no caller loses an un-expire; `add_triplet` reusing an expired
+edge's uuid keeps it expired. A save over a live stored edge is written as given. In one bulk
+batch every row reads the pre-batch stored values, so unreconciled copies of an expired edge
+keep it expired but the surviving `invalid_at` depends on row order (Graphiti reconciles copies
+before a bulk save). The restore is silent (the queries return only the uuid). A custom
+`graph_operations_interface` bypasses these queries. FalkorDB, Neptune and Kuzu keep the
+upstream save. Tests:
+`tests/test_entity_edge_save_keeps_expiry.py` (query shape) and
+`tests/test_entity_edge_save_keeps_expiry_int.py` (live Neo4j, including the concurrent case;
+needs `GRAPHITI_SAVE_TEST_NEO4J_URI`).
+
 ## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
 
 `node_operations._extract_entity_attributes` is the single boundary where node attributes

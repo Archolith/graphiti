@@ -1,5 +1,19 @@
 # Changelog — graphiti
 
+## 2026-10-11 — A stale save never makes a stored expired edge live again (Neo4j)
+
+- `graphiti_core/models/edges/edge_db_queries.py`: the Neo4j entity-edge save and bulk save
+  lock the relationship, read the stored `expired_at`/`invalid_at`, replace, and, once the
+  stored edge is expired, keep the earliest `expired_at` and earliest non-null `invalid_at`.
+  Fixes the Menhir P3c-1 race (a writer that fetched an edge before another writer expired it
+  saved it back live) and review M1 (a stale save that expired the edge itself moved the
+  truncated end later). Other providers are unchanged.
+- `tests/test_entity_edge_save_keeps_expiry.py` (offline, in the Menhir compatibility
+  workflow) and `tests/test_entity_edge_save_keeps_expiry_int.py` (live Neo4j via
+  `GRAPHITI_SAVE_TEST_NEO4J_URI`): NEW. Mutants (no restore, no lock before the read, restore
+  `expired_at` only, last writer wins when the save carries an expiry) each fail live tests.
+  `menhir-compatibility.yml` adds `edge_db_queries.py` to pyright.
+
 ## 2026-10-10 — Release prep for `v0.30.2.post6`
 
 - `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
