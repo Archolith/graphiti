@@ -32,6 +32,7 @@ from graphiti_core.decorators import handle_multiple_group_ids
 from graphiti_core.driver.driver import GraphDriver
 from graphiti_core.driver.neo4j_driver import Neo4jDriver
 from graphiti_core.edge_expiry import EdgeExpiryHook, edge_expiry_kwargs
+from graphiti_core.edge_invalidation import EdgeInvalidationHook, edge_invalidation_kwargs
 from graphiti_core.edges import (
     CommunityEdge,
     Edge,
@@ -176,6 +177,7 @@ class Graphiti:
     candidate_filter_hook: CandidateFilterHook | None = None
     node_pre_resolution_hook: NodePreResolutionHook | None = None
     edge_expiry_hook: EdgeExpiryHook | None = None
+    edge_invalidation_hook: EdgeInvalidationHook | None = None
     preserved_edge_attributes: frozenset[str] = frozenset()
 
     def __init__(
@@ -196,6 +198,7 @@ class Graphiti:
         candidate_filter_hook: CandidateFilterHook | None = None,
         node_pre_resolution_hook: NodePreResolutionHook | None = None,
         edge_expiry_hook: EdgeExpiryHook | None = None,
+        edge_invalidation_hook: EdgeInvalidationHook | None = None,
         preserved_edge_attributes: Iterable[str] | None = None,
     ):
         """
@@ -267,6 +270,10 @@ class Graphiti:
             own ``invalid_at``, whether that end expires the edge (upstream) or is
             the fact's world-time end. See :mod:`graphiti_core.edge_expiry`. When
             absent, edge expiry is unchanged.
+        edge_invalidation_hook : EdgeInvalidationHook | None, optional
+            Optional extension hook that may veto the invalidation or expiry of an
+            edge (own end, newer candidate, contradiction). See
+            :mod:`graphiti_core.edge_invalidation`. When absent, behavior is unchanged.
         preserved_edge_attributes : Iterable[str] | None, optional
             Names of edge properties a caller stores outside Graphiti. On a resolved
             duplicate they keep their stored values when resolution recomputes or
@@ -348,6 +355,7 @@ class Graphiti:
 
         # Optional edge-expiry extension hook for an edge's own end (neutral; no policy)
         self.edge_expiry_hook = edge_expiry_hook
+        self.edge_invalidation_hook = edge_invalidation_hook
 
         # Caller-owned edge properties kept across duplicate resolution (neutral; no policy)
         self.preserved_edge_attributes = preserved_names
@@ -900,6 +908,7 @@ class Graphiti:
             edge_types or {},
             edge_type_map,
             **edge_expiry_kwargs(self.edge_expiry_hook),
+            **edge_invalidation_kwargs(self.edge_invalidation_hook),
             **preserved_attributes_kwargs(self.preserved_edge_attributes),
         )
 
@@ -1176,6 +1185,7 @@ class Graphiti:
                     edge_types or {},
                     edge_type_map,
                     **edge_expiry_kwargs(self.edge_expiry_hook),
+                    **edge_invalidation_kwargs(self.edge_invalidation_hook),
                     **preserved_attributes_kwargs(self.preserved_edge_attributes),
                 )
                 for episode in episodes
@@ -1708,6 +1718,7 @@ class Graphiti:
                     edge_types or {},
                     edge_type_map or edge_type_map_default,
                     **edge_expiry_kwargs(self.edge_expiry_hook),
+                    **edge_invalidation_kwargs(self.edge_invalidation_hook),
                     **preserved_attributes_kwargs(self.preserved_edge_attributes),
                 )
 
@@ -2101,6 +2112,7 @@ class Graphiti:
             ),
             None,
             **edge_expiry_kwargs(self.edge_expiry_hook),
+            **edge_invalidation_kwargs(self.edge_invalidation_hook),
             **preserved_attributes_kwargs(self.preserved_edge_attributes),
         )
 

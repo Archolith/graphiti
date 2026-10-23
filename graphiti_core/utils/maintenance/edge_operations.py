@@ -30,6 +30,14 @@ from graphiti_core.edge_expiry import (
     edge_expiry_kwargs,
     evaluate_edge_expiry_decision,
 )
+from graphiti_core.edge_invalidation import (
+    EdgeInvalidationContext,
+    EdgeInvalidationDecision,
+    EdgeInvalidationHook,
+    EdgeInvalidationReason,
+    edge_invalidation_kwargs,
+    evaluate_edge_invalidation_decision,
+)
 from graphiti_core.edges import (
     CommunityEdge,
     EntityEdge,
@@ -344,12 +352,14 @@ async def resolve_extracted_edges(
     edge_type_map: dict[tuple[str, str], list[str]],
     existing_edges_override: list[EntityEdge] | None = None,
     edge_expiry_hook: EdgeExpiryHook | None = None,
+    edge_invalidation_hook: EdgeInvalidationHook | None = None,
     preserved_attributes: frozenset[str] = frozenset(),
 ) -> tuple[list[EntityEdge], list[EntityEdge], list[EntityEdge]]:
     """Resolve extracted edges against existing graph context.
 
     ``edge_expiry_hook`` is passed to every ``resolve_extracted_edge`` call; see
-    :mod:`graphiti_core.edge_expiry`. ``preserved_attributes`` names caller-owned edge
+    :mod:`graphiti_core.edge_expiry`. ``edge_invalidation_hook`` likewise; see
+    :mod:`graphiti_core.edge_invalidation`. ``preserved_attributes`` names caller-owned edge
     properties that keep their stored values on a resolved duplicate; it is passed to
     every ``resolve_extracted_edge`` call as well.
 
@@ -528,6 +538,7 @@ async def resolve_extracted_edges(
                     episode,
                     extracted_edge_types,
                     **edge_expiry_kwargs(edge_expiry_hook),
+                    **edge_invalidation_kwargs(edge_invalidation_hook),
                     **preserved_attributes_kwargs(preserved_attributes),
                 )
                 for extracted_edge, related_edges, existing_edges, extracted_edge_types in zip(
@@ -630,6 +641,31 @@ def reconcile_edge_copies(
                 edge.attributes = dict(attributes)
 
 
+def _contradiction_invalidates(edge: EntityEdge, resolved_edge: EntityEdge) -> bool:
+    """True when ``resolved_edge`` invalidates ``edge`` (the mutating branch below)."""
+    # (Edge invalid before new edge becomes valid) or (new edge invalid before edge becomes valid)
+    edge_invalid_at_utc = ensure_utc(edge.invalid_at)
+    resolved_edge_valid_at_utc = ensure_utc(resolved_edge.valid_at)
+    edge_valid_at_utc = ensure_utc(edge.valid_at)
+    resolved_edge_invalid_at_utc = ensure_utc(resolved_edge.invalid_at)
+
+    if (
+        edge_invalid_at_utc is not None
+        and resolved_edge_valid_at_utc is not None
+        and edge_invalid_at_utc <= resolved_edge_valid_at_utc
+    ) or (
+        edge_valid_at_utc is not None
+        and resolved_edge_invalid_at_utc is not None
+        and resolved_edge_invalid_at_utc <= edge_valid_at_utc
+    ):
+        return False
+    return (
+        edge_valid_at_utc is not None
+        and resolved_edge_valid_at_utc is not None
+        and edge_valid_at_utc < resolved_edge_valid_at_utc
+    )
+
+
 def resolve_edge_contradictions(
     resolved_edge: EntityEdge, invalidation_candidates: list[EntityEdge]
 ) -> list[EntityEdge]:
@@ -639,28 +675,8 @@ def resolve_edge_contradictions(
     # Determine which contradictory edges need to be expired
     invalidated_edges: list[EntityEdge] = []
     for edge in invalidation_candidates:
-        # (Edge invalid before new edge becomes valid) or (new edge invalid before edge becomes valid)
-        edge_invalid_at_utc = ensure_utc(edge.invalid_at)
-        resolved_edge_valid_at_utc = ensure_utc(resolved_edge.valid_at)
-        edge_valid_at_utc = ensure_utc(edge.valid_at)
-        resolved_edge_invalid_at_utc = ensure_utc(resolved_edge.invalid_at)
-
-        if (
-            edge_invalid_at_utc is not None
-            and resolved_edge_valid_at_utc is not None
-            and edge_invalid_at_utc <= resolved_edge_valid_at_utc
-        ) or (
-            edge_valid_at_utc is not None
-            and resolved_edge_invalid_at_utc is not None
-            and resolved_edge_invalid_at_utc <= edge_valid_at_utc
-        ):
-            continue
         # New edge invalidates edge
-        elif (
-            edge_valid_at_utc is not None
-            and resolved_edge_valid_at_utc is not None
-            and edge_valid_at_utc < resolved_edge_valid_at_utc
-        ):
+        if _contradiction_invalidates(edge, resolved_edge):
             edge.invalid_at = resolved_edge.valid_at
             edge.expired_at = edge.expired_at if edge.expired_at is not None else utc_now()
             invalidated_edges.append(edge)
@@ -723,6 +739,7 @@ async def resolve_extracted_edge(
     episode: EpisodicNode,
     edge_type_candidates: dict[str, type[BaseModel]] | None = None,
     edge_expiry_hook: EdgeExpiryHook | None = None,
+    edge_invalidation_hook: EdgeInvalidationHook | None = None,
     preserved_attributes: frozenset[str] = frozenset(),
 ) -> tuple[EntityEdge, list[EntityEdge], list[EntityEdge]]:
     """Resolve an extracted edge against existing graph context.
@@ -744,6 +761,9 @@ async def resolve_extracted_edge(
     edge_expiry_hook : EdgeExpiryHook | None
         Optional hook deciding whether the resolved edge's own ``invalid_at`` expires it.
         See :mod:`graphiti_core.edge_expiry`. When absent, upstream behavior.
+    edge_invalidation_hook : EdgeInvalidationHook | None
+        Optional hook that may veto an invalidation or expiry of an edge.
+        See :mod:`graphiti_core.edge_invalidation`. When absent, upstream behavior.
     preserved_attributes : frozenset[str]
         Names of edge properties stored by the caller outside Graphiti. On the LLM
         duplicate path they keep their stored values when attributes are recomputed
@@ -950,6 +970,30 @@ async def resolve_extracted_edge(
 
     now = utc_now()
 
+    # One answer per (reason, target, cause) pair in this call; the LLM may repeat an index.
+    invalidation_answers: dict[tuple[EdgeInvalidationReason, int, int], bool] = {}
+
+    async def invalidation_allowed(
+        target: EntityEdge, cause: EntityEdge, reason: EdgeInvalidationReason
+    ) -> bool:
+        if edge_invalidation_hook is None:
+            return True
+        key = (reason, id(target), id(cause))
+        if key not in invalidation_answers:
+            decision = evaluate_edge_invalidation_decision(
+                await edge_invalidation_hook.decide_edge_invalidation(
+                    EdgeInvalidationContext(
+                        target_edge=target,
+                        cause_edge=cause,
+                        reason=reason,
+                        target_is_new=target is extracted_edge,
+                        episode=episode,
+                    )
+                )
+            )
+            invalidation_answers[key] = decision is EdgeInvalidationDecision.INVALIDATE
+        return invalidation_answers[key]
+
     # The edge's own end: upstream expires it; a hook may say it is a world-time end.
     world_end_utc: datetime | None = None
     if resolved_edge.invalid_at and not resolved_edge.expired_at:
@@ -973,7 +1017,20 @@ async def resolve_extracted_edge(
         )
         if decision is EdgeExpiryDecision.WORLD_END and has_window:
             world_end_utc = own_end_utc
-        else:
+        elif (
+            has_window
+            and resolved_edge is not extracted_edge
+            and resolved_edge.expired_at is None
+            and not await invalidation_allowed(
+                resolved_edge, extracted_edge, EdgeInvalidationReason.OWN_END
+            )
+        ):
+            # Vetoed: the stored edge stays live and its own end bounds it like a world-time
+            # end, so path 2 below can only move invalid_at earlier, never later.
+            world_end_utc = own_end_utc
+        elif edge_invalidation_hook is None or resolved_edge.expired_at is None:
+            # With a hook, re-checked: its awaits can yield to a concurrent resolution of this
+            # shared edge (bulk pass 1), whose expiry is kept. No hook: upstream, unchanged.
             resolved_edge.expired_at = now
 
     # Determine if the new_edge needs to be expired
@@ -991,18 +1048,47 @@ async def resolve_extracted_edge(
                 if world_end_utc is not None:
                     # Undated start: the window is open, so an in-window contradiction
                     # expires it as upstream would, without inventing a truncation date.
+                    if not await invalidation_allowed(
+                        resolved_edge, candidate, EdgeInvalidationReason.NEWER_CANDIDATE
+                    ):
+                        continue
+                    # The await may have let a concurrent resolution end this shared edge.
+                    if resolved_edge.expired_at is not None:
+                        break
                     resolved_edge.expired_at = now
                     break
                 continue
             if candidate_valid_at_utc > resolved_edge_valid_at_utc:
+                if not await invalidation_allowed(
+                    resolved_edge, candidate, EdgeInvalidationReason.NEWER_CANDIDATE
+                ):
+                    continue
+                # The await may have let a concurrent resolution end this shared edge. Keep the
+                # earlier end: never later than either sequential (no-hook) order would leave it.
+                if resolved_edge.expired_at is not None:
+                    current_end_utc = ensure_utc(resolved_edge.invalid_at)
+                    if current_end_utc is None or candidate_valid_at_utc < current_end_utc:
+                        resolved_edge.invalid_at = candidate.valid_at
+                    break
                 # Expire new edge since we have information about more recent events
                 resolved_edge.invalid_at = candidate.valid_at
                 resolved_edge.expired_at = now
                 break
 
     # Determine which contradictory edges need to be expired
+    contradiction_candidates = invalidation_candidates
+    if edge_invalidation_hook is not None:
+        # Only pairs the hook allowed are passed on; resolve_edge_contradictions re-checks the
+        # predicate, so a candidate whose dates changed during an await is skipped, not ended.
+        # The cause is the new mention (extracted_edge), never a stored duplicate it matched.
+        contradiction_candidates = []
+        for candidate in invalidation_candidates:
+            if _contradiction_invalidates(candidate, resolved_edge) and await invalidation_allowed(
+                candidate, extracted_edge, EdgeInvalidationReason.CONTRADICTION
+            ):
+                contradiction_candidates.append(candidate)
     invalidated_edges: list[EntityEdge] = resolve_edge_contradictions(
-        resolved_edge, invalidation_candidates
+        resolved_edge, contradiction_candidates
     )
     duplicate_edges: list[EntityEdge] = [related_edges[idx] for idx in duplicate_fact_ids]
 

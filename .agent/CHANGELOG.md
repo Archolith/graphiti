@@ -1,5 +1,21 @@
 # Changelog — graphiti
 
+## 2026-10-23 — Edge-invalidation hook: host veto on expiring an edge
+
+- `graphiti_core/edge_invalidation.py`: NEW. `EdgeInvalidationHook`, `EdgeInvalidationContext`,
+  `EdgeInvalidationDecision` (`INVALIDATE`/`KEEP`), `EdgeInvalidationReason` (`OWN_END`,
+  `NEWER_CANDIDATE`, `CONTRADICTION`), `edge_invalidation_kwargs`.
+- `graphiti_core/utils/maintenance/edge_operations.py`: `resolve_extracted_edge` asks the hook
+  before each of the three expiry sites, once per pair and only when a write would follow; `KEEP`
+  never leaves an edge more invalidated than no hook (an own-end veto bounds later truncation to
+  the edge's own `invalid_at`; an inverted window is expired unasked). With a hook, writes
+  after a hook await re-check the shared edge (bulk pass 1 interleaving): an existing expiry
+  is kept and the earlier `invalid_at` wins. `resolve_edge_contradictions` shares its predicate via
+  `_contradiction_invalidates` with identical behavior. Threaded through
+  `resolve_extracted_edges`, `dedupe_edges_bulk` and every `Graphiti` resolver call; no hook keeps
+  the legacy call shape. For Menhir: agent-recorded memories must never expire a user statement.
+- `tests/test_edge_invalidation.py`: NEW, in `menhir-compatibility.yml` (ruff, pyright, pytest).
+
 ## 2026-10-11 — Release prep for `v0.30.2.post7`
 
 - `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed

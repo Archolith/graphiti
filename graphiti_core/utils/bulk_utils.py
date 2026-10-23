@@ -30,6 +30,7 @@ from graphiti_core.driver.driver import (
     GraphProvider,
 )
 from graphiti_core.edge_expiry import EdgeExpiryHook, edge_expiry_kwargs
+from graphiti_core.edge_invalidation import EdgeInvalidationHook, edge_invalidation_kwargs
 from graphiti_core.edges import Edge, EntityEdge, EpisodicEdge, create_entity_edge_embeddings
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.graphiti_types import GraphitiClients
@@ -537,6 +538,7 @@ async def dedupe_edges_bulk(
     edge_types: dict[str, type[BaseModel]],
     _edge_type_map: dict[tuple[str, str], list[str]],
     edge_expiry_hook: EdgeExpiryHook | None = None,
+    edge_invalidation_hook: EdgeInvalidationHook | None = None,
     preserved_attributes: frozenset[str] = frozenset(),
 ) -> dict[str, list[EntityEdge]]:
     embedder = clients.embedder
@@ -597,6 +599,7 @@ async def dedupe_edges_bulk(
                 episode,
                 edge_types,
                 **edge_expiry_kwargs(edge_expiry_hook),
+                **edge_invalidation_kwargs(edge_invalidation_hook),
                 **preserved_attributes_kwargs(preserved_attributes),
             )
             for episode, edge, candidates in dedupe_tuples
