@@ -345,6 +345,49 @@ upstream save. Tests:
 `tests/test_entity_edge_save_keeps_expiry_int.py` (live Neo4j, including the concurrent case;
 needs `GRAPHITI_SAVE_TEST_NEO4J_URI`).
 
+## Edge-Invalidation Hook: Host Veto on Expiring an Edge (native, fork)
+
+Upstream contradiction handling is tier-blind: in `resolve_extracted_edge` a newer edge expires
+an older contradicting one using only `valid_at`/`invalid_at`. A host that ranks sources (Menhir:
+a user statement must never be expired by an agent-recorded memory) needs a veto. An
+`EdgeInvalidationHook` (`graphiti_core/edge_invalidation.py`) may be passed to `Graphiti(...)`.
+It is asked before the mutation it guards, only for pairs that would be written as of the ask, and at
+most once per (reason, target, cause) in one call, with a frozen `EdgeInvalidationContext`
+(`target_edge`, `cause_edge`, `reason`, `target_is_new`, `episode`; models borrowed, read-only).
+`KEEP` means "this cause does not end this edge": the result never gains an `expired_at`, an
+invalidated edge or a later `invalid_at` that no-hook resolution would not write (an earlier
+`invalid_at` is possible when another, allowed cause truncates). Three sites:
+
+- `OWN_END`: a stored duplicate the mention resolved to has its own `invalid_at` and would be
+  expired (path 1). The edge-expiry hook is asked first; a `WORLD_END` answer needs no veto,
+  and an inverted window is expired unasked, as upstream.
+  On `KEEP` the edge stays live and its own `invalid_at` bounds it like a world-time end, so
+  path 2 can only move `invalid_at` earlier. Cause: the extracted edge.
+- `NEWER_CANDIDATE`: the resolved edge (new or stored) would be expired because a contradicted
+  candidate starts later (path 2). `KEEP` skips that candidate; a later one may still expire it.
+- `CONTRADICTION`: an older contradicted candidate would be truncated and expired (path 3).
+  Only candidates the shared predicate (`_contradiction_invalidates`) selects are asked, and
+  only those answered `INVALIDATE` reach `resolve_edge_contradictions`, whose logic is
+  extracted into that predicate without behavior change. Cause: the extracted edge, never the
+  stored duplicate it matched, so an agent restating a user fact is still the agent's mention.
+
+`target_is_new` is "target is this call's extracted edge"; `False` does not prove it is stored.
+For `CONTRADICTION` the truncation date is the resolved edge's `valid_at` (the stored
+duplicate's on a match), not `cause_edge.valid_at`. Asks are memoized per object, so one
+stored edge loaded twice (`add_triplet` does not dedupe related vs existing) may be asked twice.
+Hook awaits can interleave concurrent resolutions of shared edge objects in bulk pass 1; with a
+hook installed every write after an await re-checks the edge, keeping an existing expiry and the
+earlier `invalid_at` (no hook: upstream, unchanged). Not covered: an extracted edge's own `invalid_at` on a non-duplicate resolution
+(no other cause), including `add_triplet` reusing a caller-supplied uuid.
+`INVALIDATE` is upstream behavior; any other return raises `TypeError`; exceptions propagate.
+Forwarded only when configured (`edge_invalidation_kwargs`), so with no hook every call keeps
+its legacy shape. Copies of one stored edge: `reconcile_edge_copies` spreads the earliest expiry
+any copy carries, so a veto holds across copies only if every expiry that reaches a copy was
+itself allowed. A host policy that depends only on the target's and the cause's sources gives
+the same answer for every copy. Known limits: `add_triplet` passes a synthetic episode (no
+source signal), and bulk pass 1 (`dedupe_edges_bulk`) resolves unsaved in-batch edges, whose
+source a host can only infer from `target_edge.episodes`. Tests: `tests/test_edge_invalidation.py`.
+
 ## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
 
 `node_operations._extract_entity_attributes` is the single boundary where node attributes
