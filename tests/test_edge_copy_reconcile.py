@@ -233,7 +233,7 @@ async def _resolve_mentions(
 
     milan = _edge('Alice lives in Milan', uuid='milan', valid_at=MILAN_START, invalid_at=None)
 
-    async def fake_search(clients, query, group_ids, config, search_filter):
+    async def fake_search(clients, query, group_ids, config, search_filter, query_vector=None):
         if search_filter.edge_uuids is not None:
             return SearchResults(edges=[_stored_copy(stored_invalid_at)])
         return SearchResults(edges=[_stored_copy(stored_invalid_at), milan])

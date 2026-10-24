@@ -352,9 +352,14 @@ async def test_hook_exception_propagates():
 
 
 def _patch_resolve_extracted_edges_deps(monkeypatch, captured: list[dict]):
-    async def fake_resolve_extracted_edge(*args, **kwargs):
-        captured.append(kwargs)
+    # Upstream 0.31.2 split resolve_extracted_edge: resolve_extracted_edges dedupes every
+    # edge first, then runs _apply_temporal_invalidation (which takes the hooks) per edge.
+    async def fake_dedupe_extracted_edge(*args, **kwargs):
         return args[1], [], []
+
+    async def fake_apply_temporal_invalidation(*args, **kwargs):
+        captured.append(kwargs)
+        return []
 
     async def immediate_gather(*aws, max_coroutines=None):
         return [await aw for aw in aws]
@@ -363,7 +368,8 @@ def _patch_resolve_extracted_edges_deps(monkeypatch, captured: list[dict]):
     monkeypatch.setattr(EntityEdge, 'get_between_nodes', AsyncMock(return_value=[]))
     monkeypatch.setattr(edge_ops, 'semaphore_gather', immediate_gather)
     monkeypatch.setattr(edge_ops, 'search', AsyncMock(return_value=SearchResults()))
-    monkeypatch.setattr(edge_ops, 'resolve_extracted_edge', fake_resolve_extracted_edge)
+    monkeypatch.setattr(edge_ops, '_dedupe_extracted_edge', fake_dedupe_extracted_edge)
+    monkeypatch.setattr(edge_ops, '_apply_temporal_invalidation', fake_apply_temporal_invalidation)
 
 
 @pytest.mark.parametrize('with_hook', [True, False])
@@ -531,16 +537,29 @@ async def test_add_triplet_threads_hook(monkeypatch):
     hook = RecordingExpiryHook()
     captured = await _run_add_triplet(monkeypatch, _make_full_graphiti(hook))
     assert len(captured) == 1
-    assert captured[0]['kwargs'] == {'edge_expiry_hook': hook}
+    assert _without_upstream_clients(captured[0]['kwargs']) == {'edge_expiry_hook': hook}
 
 
 async def test_add_triplet_no_hook_uses_legacy_signature(monkeypatch):
     captured = await _run_add_triplet(monkeypatch, _make_full_graphiti())
     assert len(captured) == 1
-    assert captured[0]['kwargs'] == {}
+    assert _without_upstream_clients(captured[0]['kwargs']) == {}
 
 
-_RESOLVER_CALLS = {'resolve_extracted_edge', 'resolve_extracted_edges', 'dedupe_edges_bulk'}
+def _without_upstream_clients(kwargs: dict) -> dict:
+    """Upstream 0.31.2 add_triplet always passes ``clients=self.clients``; drop only that."""
+    kwargs = dict(kwargs)
+    assert 'clients' in kwargs
+    del kwargs['clients']
+    return kwargs
+
+
+_RESOLVER_CALLS = {
+    'resolve_extracted_edge',
+    'resolve_extracted_edges',
+    'dedupe_edges_bulk',
+    '_apply_temporal_invalidation',
+}
 
 
 def _resolver_calls(path: Path) -> list[ast.Call]:
@@ -595,8 +614,9 @@ def test_every_resolver_call_in_graphiti_core_threads_the_hook():
                 and _names_edge_expiry_hook(kw.value.args[0])
             ]
             assert threaded, f'{path.name}:{call.lineno} does not thread edge_expiry_hook'
-    # graphiti.py x4, bulk_utils.py x1, edge_operations.py x1
-    assert found == 6
+    # graphiti.py x4, bulk_utils.py x1, edge_operations.py x2 (_apply_temporal_invalidation
+    # from resolve_extracted_edges and resolve_extracted_edge since upstream 0.31.2)
+    assert found == 7
 
 
 def test_no_menhir_imports_in_edge_expiry_mechanism():

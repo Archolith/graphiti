@@ -205,6 +205,8 @@ class OpenAIGenericClient(LLMClient):
         model_size: ModelSize = ModelSize.medium,
         group_id: str | None = None,
         prompt_name: str | None = None,
+        *,
+        model: str | None = None,
     ) -> dict[str, typing.Any]:
         openai_messages: list[ChatCompletionMessageParam] = []
         for m in messages:
@@ -214,7 +216,9 @@ class OpenAIGenericClient(LLMClient):
             elif m.role == 'system':
                 openai_messages.append({'role': 'system', 'content': m.content})
 
-        model = self.model or DEFAULT_MODEL
+        # A per-call model override (upstream LLMRuntime routing) wins over the client model;
+        # the request guard sizes and reports the model actually sent.
+        model = model or self.model or DEFAULT_MODEL
         endpoint = self._resolve_endpoint()
         guard = self.request_guard
         context = None
@@ -330,6 +334,8 @@ class OpenAIGenericClient(LLMClient):
         model_size: ModelSize = ModelSize.medium,
         group_id: str | None = None,
         prompt_name: str | None = None,
+        *,
+        model: str | None = None,
     ) -> dict[str, typing.Any]:
         return await self._generate_response(
             messages,
@@ -338,6 +344,7 @@ class OpenAIGenericClient(LLMClient):
             model_size,
             group_id=group_id,
             prompt_name=prompt_name,
+            model=model,
         )
 
     async def generate_response(
@@ -350,6 +357,7 @@ class OpenAIGenericClient(LLMClient):
         prompt_name: str | None = None,
         *,
         attribute_extraction: bool = False,
+        model: str | None = None,
     ) -> dict[str, typing.Any]:
         self._apply_attribute_extraction_preamble(messages, attribute_extraction)
         if max_tokens is None:
@@ -393,6 +401,7 @@ class OpenAIGenericClient(LLMClient):
                     model_size=model_size,
                     group_id=group_id,
                     prompt_name=prompt_name,
+                    model=model,
                 )
             except Exception as e:
                 span.set_status('error', str(e))

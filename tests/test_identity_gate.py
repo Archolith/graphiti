@@ -46,6 +46,7 @@ def _make_clients():
     embedder = MagicMock()
     cross_encoder = MagicMock()
     llm_client = MagicMock()
+    llm_client.max_tokens = 16384  # upstream 0.31.2 _resolve_with_llm reads max_tokens
     llm_client.generate_response = AsyncMock()
     return (
         GraphitiClientsStub(driver, embedder, cross_encoder, llm_client),

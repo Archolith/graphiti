@@ -24,12 +24,12 @@ CONTEXT_B = {
     'custom_extraction_instructions': '',
 }
 
-# sha256 of the pre-split prompt (menhir/main bc0ba9c, single system + single user message) for
-# CONTEXT_A. The split must reproduce it exactly: persona == old system message, and
-# '\n' + <rest of new system> + <new user> == old user message. Any intentional prompt edit must
-# update these pins.
-_OLD_SYSTEM_SHA256 = 'a20d106ed76c8414ab95a029f89c568b062658bb4d2cbf7faae018ad98278b26'
-_OLD_USER_SHA256 = '85e783e20636484bcbbcc825d7b23e092c4798c562a361b609569d8e6a216fbf'
+# sha256 of upstream's unsplit prompt (getzep/graphiti 0.31.2, 3ffc978: single system + single
+# user message, C2 instruction text) for CONTEXT_A. The split must reproduce it exactly:
+# persona == upstream system message, and <rest of new system> + <new user> == upstream user
+# message. Any intentional prompt edit must update these pins.
+_OLD_SYSTEM_SHA256 = '9c8a6ac357b072e9a90b85f102a5cf94541772493523066a88030673012ab8b9'
+_OLD_USER_SHA256 = '6fd8833089540065ed3ae4770842472cd6d152e51e978daaa3a8ad4e1be5ef84'
 
 
 def _sha256(text: str) -> str:
@@ -41,8 +41,8 @@ def _sha256(text: str) -> str:
 def test_static_instructions_live_in_system_message():
     [system, user] = extract_message(CONTEXT_A)
 
-    assert 'ENTITY RULES:' in system.content
-    assert '</NEGATIVE EXAMPLES>' in system.content
+    assert '# Goal' in system.content
+    assert '# Output' in system.content
     assert '<ENTITY TYPES>' in system.content
     assert '<FACT TYPES>' in system.content
     assert '<CURRENT MESSAGES>' not in system.content
@@ -50,7 +50,7 @@ def test_static_instructions_live_in_system_message():
 
     assert '<PREVIOUS MESSAGES>' in user.content
     assert '<CURRENT MESSAGES>' in user.content
-    assert 'ENTITY RULES:' not in user.content
+    assert '# Goal' not in user.content
 
 
 def test_system_message_is_independent_of_per_call_content():
@@ -65,4 +65,4 @@ def test_split_reproduces_the_previous_prompt_byte_for_byte():
     persona, static_block = system.content.split('\n\n', 1)
 
     assert _sha256(persona) == _OLD_SYSTEM_SHA256
-    assert _sha256('\n' + static_block + user.content) == _OLD_USER_SHA256
+    assert _sha256(static_block + user.content) == _OLD_USER_SHA256

@@ -6,8 +6,9 @@ Graphiti is a framework for building and querying temporal context graphs for AI
 episodes (messages, text, JSON) into a graph of entities, relations, and communities with temporal validity windows,
 then supports hybrid retrieval (semantic + keyword + graph traversal) without full recomputation.
 
-**Fork context:** this tree is the Archolith soft fork of upstream `getzep/graphiti`, baseline tag `v0.30.2`, exact
-commit `eaa4128681bc53487138a4bbc22d58336ebe70d2`, branch `menhir/main`. `origin` is `Archolith/graphiti`; `upstream`
+**Fork context:** this tree is the Archolith soft fork of upstream `getzep/graphiti`, baseline graphiti-core
+`0.31.2`: upstream `main` at `3ffc978753a95fb5f363d4f6509b65ac023379cc` (tag `v0.31.2`, `d72407d`, plus six commits
+that do not touch `graphiti_core`), branch `menhir/main`. `origin` is `Archolith/graphiti`; `upstream`
 is `getzep/graphiti`. Semantic customization migration has begun (see `.agent/CHANGELOG.md`); Menhir's runtime
 patches remain installed until Phase F.
 
@@ -139,9 +140,12 @@ exists to keep custom-schema episodes on the exact pre-C1g upstream/installer pa
 machinery. Bulk routing (`extract_nodes_and_edges_bulk`) is unchanged.
 
 Combined-extraction prompt caching: `graphiti_core/prompts/extract_nodes_and_edges.py::extract_message` splits its
-output across messages — the system message carries the static persona, all instruction blocks (ENTITY RULES through
-</NEGATIVE EXAMPLES>), and the <ENTITY TYPES>/<FACT TYPES> catalogs (byte-identical to the pre-split text); the user
-message carries only per-call content (<PREVIOUS MESSAGES>, <CURRENT MESSAGES>, custom instructions). This keeps the
+output across messages — the system message carries the static persona, upstream's C2 instruction text (`# Goal`
+through `# Output`), and the <ENTITY TYPES>/<FACT TYPES> catalogs; the user message carries only per-call content
+(custom instructions, <PREVIOUS MESSAGES>, <CURRENT MESSAGES>). The text is upstream 0.31.2's byte for byte: persona +
+`\n\n` + static part is the system message, and static part + user message equals upstream's single user message
+(SHA-pinned in `tests/test_extract_nodes_and_edges_prompt_cacheable.py`). Upstream's configurable prompt library
+(`DefaultExtractNodesAndEdgesPrompts`) delegates to `extract_message`, so routed prompts keep the split. This keeps the
 system prefix stable across calls for a deployment so GPT-5.6+ models — which only reuse cached prefixes at message
 boundaries — hit the prompt cache (measured 98% cached input tokens vs 0% with everything in the user message).
 
@@ -254,12 +258,18 @@ remains outside the fork and is wired on top of this hook during Phase F.
 
 ## Edge-Expiry Hook for an Edge's Own End (native, fork; Menhir policy divergence)
 
-Upstream `edge_operations.resolve_extracted_edge` expires every resolved edge that carries
+Upstream temporal invalidation expires every resolved edge that carries
 its own `invalid_at` ("path 1"), even with no contradiction, so a finished trip or a past
-state reads as a superseded belief. An `EdgeExpiryHook` (see `graphiti_core/edge_expiry.py`)
-may be passed to `Graphiti(...)`. It is asked once per `resolve_extracted_edge` call that
-reaches the expiry step, only when the resolved edge (new, or the existing edge an extracted
-edge was resolved to as a duplicate) has `invalid_at` set and `expired_at` unset. The
+state reads as a superseded belief. Since upstream 0.31.2 edge resolution is split:
+`_dedupe_extracted_edge` (dedupe, attributes, timestamps; returns the invalidation candidates,
+or `None` on the early-return and exact-fact fast paths) and `_apply_temporal_invalidation`
+(paths 1-3). `resolve_extracted_edges` dedupes every edge concurrently, then applies temporal
+invalidation to each edge sequentially; `resolve_extracted_edge` (bulk pass 1, `add_triplet`)
+runs both for one edge. The fork's `_apply_temporal_invalidation` is async and carries both
+edge hooks; with neither hook it is upstream's logic unchanged. An `EdgeExpiryHook` (see
+`graphiti_core/edge_expiry.py`) may be passed to `Graphiti(...)`. It is asked once per
+`_apply_temporal_invalidation` call, only when the resolved edge (new, or the existing edge an
+extracted edge was resolved to as a duplicate) has `invalid_at` set and `expired_at` unset. The
 early-return (no candidates) and exact-fact fast paths never reach it.
 
 The hook gets a frozen `EdgeExpiryContext` (`extracted_edge`, `resolved_edge`,
@@ -280,21 +290,21 @@ Any other return value raises `TypeError`; hook exceptions propagate and abort t
 module-global state, `ContextVar` or cache. The hook is forwarded only when configured
 (`edge_expiry_kwargs`), so with no hook every call keeps the legacy shape: `add_episode`
 and `_resolve_nodes_and_edges_bulk` (`resolve_extracted_edges`), `add_episode_bulk`
-(`dedupe_edges_bulk`) and `add_triplet` (`resolve_extracted_edge`).
-`tests/test_edge_expiry.py` has a structural guard that every resolver call in
-`graphiti_core` threads it; `menhir-compatibility.yml` runs it on every `menhir/**` PR.
+(`dedupe_edges_bulk`) and `add_triplet` (`resolve_extracted_edge`, which upstream now also
+passes `clients=`). `tests/test_edge_expiry.py` has a structural guard that every resolver
+call in `graphiti_core`, including both `_apply_temporal_invalidation` calls, threads it; `menhir-compatibility.yml` runs it on every `menhir/**` PR.
 The known limitation (bulk pass-1 in-batch duplicates) is listed in the module docstring.
 
 Copies of one stored edge: mentions resolve in parallel, each against its own fetched copy,
 and the edge save is a full replace per row, so the last copy saved would win.
 `reconcile_edge_copies` gives every copy with the same uuid the earliest `expired_at`, the
 earliest `invalid_at`, the union of `episodes` and the `attributes` of the last copy whose
-attributes resolution recomputed or cleared, in place, at the end of
-`resolve_extracted_edges` (`add_episode`) and where
+attributes resolution recomputed or cleared, in place, in `resolve_extracted_edges`
+(`add_episode`) after every edge's temporal invalidation and before the embeddings, and where
 `_resolve_nodes_and_edges_bulk` combines episodes (`add_episode_bulk`). A supersession
 found by any mention therefore survives every save order, hook or not
 (`tests/test_edge_copy_reconcile.py`). Which copies were recomputed is tracked by the
-in-memory, never-saved `EntityEdge._attributes_resolved` mark: `resolve_extracted_edge` sets it
+in-memory, never-saved `EntityEdge._attributes_resolved` mark: `_dedupe_extracted_edge` sets it
 where it computes or clears attributes, and `resolve_extracted_edges` resets it on every
 candidate before resolving. A copy from the exact-fact fast path, or one that is only an
 invalidation candidate, is never the source of the attributes, so its fetched ones never
@@ -309,10 +319,12 @@ invalidation candidates (upstream behavior, not changed here).
 
 Caller-preserved edge attributes: a fetched stored edge carries every row property in
 `attributes` (`properties(e) AS attributes`), and `EntityEdge.save` writes `attributes` back as
-a full replace. On the LLM duplicate path `resolve_extracted_edge` recomputes attributes from
-an edge schema or clears them to `{}`, which used to drop properties a caller stores outside
-Graphiti (Menhir's anchored-time contract and world-end stamp). `Graphiti(preserved_edge_attributes=
-...)` names such keys; `resolve_extracted_edge(preserved_attributes=...)` captures their values
+a full replace. On the LLM duplicate path `_dedupe_extracted_edge` recomputes attributes from
+an edge schema or clears them to `{}` (since upstream 0.31.2 only when a schema map is supplied,
+which `resolve_extracted_edges` always does; `add_triplet` omits it and keeps attributes), which
+used to drop properties a caller stores outside Graphiti (Menhir's anchored-time contract and
+world-end stamp). `Graphiti(preserved_edge_attributes=...)` names such keys;
+`_dedupe_extracted_edge(preserved_attributes=...)` captures their values
 before the recompute/clear and restores them before the edge-expiry hook runs, so the hook
 sees them and the save keeps them. Only on a duplicate (a new edge clears as upstream). Only a
 schema field the recomputation produced beats the stored value; any other preserved key keeps
@@ -347,7 +359,7 @@ needs `GRAPHITI_SAVE_TEST_NEO4J_URI`).
 
 ## Edge-Invalidation Hook: Host Veto on Expiring an Edge (native, fork)
 
-Upstream contradiction handling is tier-blind: in `resolve_extracted_edge` a newer edge expires
+Upstream contradiction handling is tier-blind: in `_apply_temporal_invalidation` a newer edge expires
 an older contradicting one using only `valid_at`/`invalid_at`. A host that ranks sources (Menhir:
 a user statement must never be expired by an agent-recorded memory) needs a veto. An
 `EdgeInvalidationHook` (`graphiti_core/edge_invalidation.py`) may be passed to `Graphiti(...)`.
@@ -375,9 +387,11 @@ invalidated edge or a later `invalid_at` that no-hook resolution would not write
 For `CONTRADICTION` the truncation date is the resolved edge's `valid_at` (the stored
 duplicate's on a match), not `cause_edge.valid_at`. Asks are memoized per object, so one
 stored edge loaded twice (`add_triplet` does not dedupe related vs existing) may be asked twice.
-Hook awaits can interleave concurrent resolutions of shared edge objects in bulk pass 1; with a
-hook installed every write after an await re-checks the edge, keeping an existing expiry and the
-earlier `invalid_at` (no hook: upstream, unchanged). Not covered: an extracted edge's own `invalid_at` on a non-duplicate resolution
+Hook awaits can interleave concurrent resolutions of shared edge objects in bulk pass 1
+(`dedupe_edges_bulk` runs `resolve_extracted_edge` per edge concurrently; `resolve_extracted_edges`
+applies temporal invalidation sequentially since upstream 0.31.2); with a hook installed every
+write after an await re-checks the edge, keeping an existing expiry and the earlier `invalid_at`
+(no hook: upstream, unchanged). Not covered: an extracted edge's own `invalid_at` on a non-duplicate resolution
 (no other cause), including `add_triplet` reusing a caller-supplied uuid.
 `INVALIDATE` is upstream behavior; any other return raises `TypeError`; exceptions propagate.
 Forwarded only when configured (`edge_invalidation_kwargs`), so with no hook every call keeps
@@ -553,8 +567,9 @@ remains Menhir-owned retry policy and is not ported.
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.
-- Maintenance branch: `menhir/main`, the single long-lived fork line (currently upstream `v0.30.2` plus fork
-  changes; it began at upstream `v0.29.3`, `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`). Releases are `v*` tags on it.
+- Maintenance branch: `menhir/main`, the single long-lived fork line (currently upstream graphiti-core `0.31.2`
+  plus fork changes, package version `0.31.2.postN`; it began at upstream `v0.29.3`,
+  `021d3a57d511f21b10adaf7fa923bd5c1fce5e9d`). Releases are `v*` tags on it.
 - Upstream remote: `getzep/graphiti` (`upstream`).
 - Consumers pin exact fork commit SHAs; branches and tags are never used as consumption pins.
 - Upstream changes are applied via assessed cherry-pick/rebase in a separate worktree, gated, then the pinned SHA is
@@ -599,3 +614,31 @@ bulk deduplication use the upstream request-scoped GraphitiClients bundle. Neith
 concurrent tenant changes nor extraction hooks mutate the shared instance driver.
 Upstream search reranking, Neo4j routing, saga refetch and untyped attribute fixes
 are preserved. The Menhir compatibility workflow tests the merged boundaries.
+
+## Upstream 0.31.2 reconciliation
+
+`menhir/main` merges upstream `main` at `3ffc978` (graphiti-core 0.31.2; merge base
+`eaa41286`, 71 upstream commits). Every fork hook, constructor option and prompt change is
+kept; where upstream rewrote the same code, upstream's change is adopted and the fork seam
+re-applied on top:
+
+- Edge resolution split (`_dedupe_extracted_edge` + `_apply_temporal_invalidation`, temporal
+  invalidation sequential after all dedupes, `invalidated_by`, `strict_edge_types` signature
+  enforcement): the fork's hook-aware temporal block lives in the async
+  `_apply_temporal_invalidation`; preserved attributes and the `_attributes_resolved` mark live
+  in `_dedupe_extracted_edge`; `reconcile_edge_copies` runs after the invalidation loop.
+- Dangling-endpoint materialization (`extract_edges` returns materialized nodes; Graphiti
+  merges them): `_merge_materialized_endpoint_nodes` forwards the identity-gate,
+  candidate-filter and pre-resolution hooks when configured. Combined/hook edges
+  (`precomputed_edges`) skip `extract_edges`, so they materialize nothing.
+- Configurable prompts / `LLMRuntime` (`generate_prompt_response`, `clients=`): fork resolver
+  paths (`_resolve_with_llm`, bisection, attribute extraction) pass `clients` through; the
+  combined prompt keeps the cache split (see Single-Episode Extraction Routing).
+- `OpenAIGenericClient` `model=` override: the request guard sees the effective model.
+- Identity-property and exact-name candidate lookups join the semantic search pool after the
+  fork's pre-resolution; the candidate filter sees the whole pool, then upstream's
+  identity-property resolution, similarity resolution and the identity-gated LLM step run.
+- `extract_attributes_only_from_nodes` skips untyped nodes (upstream); the fork keeps the
+  untyped defensive attribute copy there.
+- `Graphiti.max_coroutines` has a class-level default like the fork hook attributes, for
+  instances built without `__init__`.

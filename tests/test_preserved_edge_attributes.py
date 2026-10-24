@@ -121,7 +121,9 @@ def _patch_edge_ops(monkeypatch):
 
 
 async def _resolve(llm, mention, stored, *, schema=False, **kwargs):
-    edge_types = {'RATED': Rating} if schema else None
+    # No schema = a supplied map with no model for RATED, as resolve_extracted_edges passes.
+    # Upstream 0.31.2 leaves attributes alone when the map is omitted (None) entirely.
+    edge_types = {'RATED': Rating} if schema else {}
     return await resolve_extracted_edge(
         llm, mention, [stored], [], _episode(), edge_types, **kwargs
     )
@@ -250,7 +252,7 @@ NODES = [
 async def test_every_copy_of_the_stored_edge_ends_with_the_preserved_keys(
     monkeypatch, exact_first, with_schema
 ):
-    async def fake_search(clients, query, group_ids, config, search_filter):
+    async def fake_search(clients, query, group_ids, config, search_filter, query_vector=None):
         return SearchResults(edges=[_stored()])
 
     monkeypatch.setattr(edge_ops, 'search', fake_search)
@@ -589,7 +591,7 @@ async def test_bulk_episodes_keep_the_preserved_keys_on_every_copy(monkeypatch, 
     """add_episode_bulk: one episode paraphrases the stored edge, another states it exactly.
     Real per-episode resolution and cross-episode reconcile; both copies keep the stamp."""
 
-    async def fake_search(clients, query, group_ids, config, search_filter):
+    async def fake_search(clients, query, group_ids, config, search_filter, query_vector=None):
         return SearchResults(edges=[_stored()])
 
     monkeypatch.setattr(edge_ops, 'search', fake_search)
