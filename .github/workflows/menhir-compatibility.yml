@@ -50,6 +50,13 @@ jobs:
             tests/test_edge_expiry.py tests/test_edge_copy_reconcile.py tests/test_edge_copy_attributes.py \
             tests/test_preserved_edge_attributes.py tests/test_entity_edge_save_keeps_expiry.py \
             tests/test_edge_invalidation.py tests/utils/maintenance/test_edge_operations.py \
-            tests/utils/maintenance/test_bulk_utils.py
+            tests/utils/maintenance/test_bulk_utils.py \
+            tests/test_extract_nodes_and_edges_prompt_cacheable.py \
+            tests/utils/maintenance/test_combined_extraction.py \
+            tests/utils/maintenance/test_dangling_endpoint_merge.py \
+            tests/utils/maintenance/test_edge_dedup_scenarios.py \
+            tests/utils/maintenance/test_temporal_edge_utils.py \
+            tests/utils/maintenance/test_configurable_prompts.py \
+            tests/test_graphiti_configurable_prompts.py
       - name: Build distributable
         run: python -m build
