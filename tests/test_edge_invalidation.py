@@ -790,7 +790,7 @@ async def _resolve_two_mentions(monkeypatch, hook, *, contradicting_first: bool)
 
     milan = _edge('Alice lives in Milan', uuid='milan', valid_at=MILAN_START)
 
-    async def fake_search(clients, query, group_ids, config, search_filter):
+    async def fake_search(clients, query, group_ids, config, search_filter, query_vector=None):
         if search_filter.edge_uuids is not None:
             return SearchResults(edges=[_stored_copy()])
         return SearchResults(edges=[_stored_copy(), milan])
@@ -901,9 +901,14 @@ async def test_non_enum_return_raises_typeerror(build, bad):
 async def test_resolve_extracted_edges_threads_hook(monkeypatch, with_hook):
     captured: list[dict] = []
 
-    async def fake_resolve_extracted_edge(*args, **kwargs):
-        captured.append(kwargs)
+    # Upstream 0.31.2 split resolve_extracted_edge: resolve_extracted_edges dedupes every
+    # edge first, then runs _apply_temporal_invalidation (which takes the hooks) per edge.
+    async def fake_dedupe_extracted_edge(*args, **kwargs):
         return args[1], [], []
+
+    async def fake_apply_temporal_invalidation(*args, **kwargs):
+        captured.append(kwargs)
+        return []
 
     async def immediate_gather(*aws, max_coroutines=None):
         return [await aw for aw in aws]
@@ -912,7 +917,8 @@ async def test_resolve_extracted_edges_threads_hook(monkeypatch, with_hook):
     monkeypatch.setattr(EntityEdge, 'get_between_nodes', AsyncMock(return_value=[]))
     monkeypatch.setattr(edge_ops, 'semaphore_gather', immediate_gather)
     monkeypatch.setattr(edge_ops, 'search', AsyncMock(return_value=SearchResults()))
-    monkeypatch.setattr(edge_ops, 'resolve_extracted_edge', fake_resolve_extracted_edge)
+    monkeypatch.setattr(edge_ops, '_dedupe_extracted_edge', fake_dedupe_extracted_edge)
+    monkeypatch.setattr(edge_ops, '_apply_temporal_invalidation', fake_apply_temporal_invalidation)
     clients = SimpleNamespace(
         driver=MagicMock(), llm_client=MagicMock(), embedder=MagicMock(), cross_encoder=MagicMock()
     )
@@ -1046,18 +1052,31 @@ async def test_add_triplet_threads_hook(monkeypatch):
     hook = PolicyHook()
     captured = await _run_add_triplet(monkeypatch, _make_full_graphiti(hook))
     assert len(captured) == 1
-    assert captured[0]['kwargs'] == {'edge_invalidation_hook': hook}
+    assert _without_upstream_clients(captured[0]['kwargs']) == {'edge_invalidation_hook': hook}
 
 
 async def test_add_triplet_no_hook_uses_legacy_signature(monkeypatch):
     captured = await _run_add_triplet(monkeypatch, _make_full_graphiti())
     assert len(captured) == 1
-    assert captured[0]['kwargs'] == {}
+    assert _without_upstream_clients(captured[0]['kwargs']) == {}
+
+
+def _without_upstream_clients(kwargs: dict) -> dict:
+    """Upstream 0.31.2 add_triplet always passes ``clients=self.clients``; drop only that."""
+    kwargs = dict(kwargs)
+    assert 'clients' in kwargs
+    del kwargs['clients']
+    return kwargs
 
 
 # --- 11. structural guards ------------------------------------------------------------------
 
-_RESOLVER_CALLS = {'resolve_extracted_edge', 'resolve_extracted_edges', 'dedupe_edges_bulk'}
+_RESOLVER_CALLS = {
+    'resolve_extracted_edge',
+    'resolve_extracted_edges',
+    'dedupe_edges_bulk',
+    '_apply_temporal_invalidation',
+}
 
 
 def _resolver_calls(path: Path) -> list[ast.Call]:

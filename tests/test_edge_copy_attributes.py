@@ -86,7 +86,7 @@ def _patch(monkeypatch, *, fake_search=None, contradicting_fact=None):
     async def immediate_gather(*aws, max_coroutines=None):
         return [await aw for aw in aws]
 
-    async def fresh_search(clients, query, group_ids, config, search_filter):
+    async def fresh_search(clients, query, group_ids, config, search_filter, query_vector=None):
         return SearchResults(edges=[_stored()])
 
     async def generate_response(messages, **kwargs):
@@ -122,7 +122,7 @@ async def _resolve(monkeypatch, mentions, *, with_schema, stored_factory=None):
     fake_search = None
     if stored_factory is not None:
 
-        async def fake_search(clients, query, group_ids, config, search_filter):
+        async def fake_search(clients, query, group_ids, config, search_filter, query_vector=None):
             return SearchResults(edges=[stored_factory()])
 
     clients, _ = _patch(monkeypatch, fake_search=fake_search)
@@ -202,7 +202,7 @@ async def test_a_stale_mark_on_an_invalidation_candidate_is_ignored(monkeypatch,
     candidate of a newer contradicting mention. Its stale attributes must not win."""
     newer = 'Alice now rates the Rome hotel differently'
 
-    async def fake_search(clients, query, group_ids, config, search_filter):
+    async def fake_search(clients, query, group_ids, config, search_filter, query_vector=None):
         if query != newer:
             return SearchResults(edges=[_stored()])
         if search_filter.edge_uuids is not None:

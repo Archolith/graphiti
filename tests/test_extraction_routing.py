@@ -375,7 +375,8 @@ async def test_separate_route_still_calls_extract_edges(monkeypatch):
 
     async def fake_extract_edges(clients, episode, extracted_nodes, *args, **kwargs):
         extract_edges_calls.append(extracted_nodes)
-        return [edge]
+        # Upstream 0.31.2: extract_edges returns (edges, materialized endpoint nodes).
+        return [edge], []
 
     def fake_resolve_edge_pointers(edges, uuid_map):
         return edges
