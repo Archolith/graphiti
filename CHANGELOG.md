@@ -5,6 +5,28 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.31.2.post1 — 2026-10-23
+
+Rebased onto upstream Graphiti 0.31.2 (`getzep/graphiti` main at `3ffc978`); every fork
+hook is carried over ([#17](https://github.com/Archolith/graphiti/pull/17)).
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.31.2.post1) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.31.2.post1/)
+
+### Added
+
+- `EdgeInvalidationHook` (`graphiti_core/edge_invalidation.py`): an optional policy hook
+  asked before an edge is expired or invalidated by its own end, a newer candidate, or
+  a contradiction. `KEEP` never adds an expiry or an invalidation compared with no hook
+  ([#16](https://github.com/Archolith/graphiti/pull/16)).
+
+### Changed
+
+- Upstream moved temporal invalidation into a separate pass that runs one edge at a
+  time. With a hook installed in `add_episode`, expiry and invalidation hooks are now
+  awaited serially instead of concurrently; with no hook, behaviour is upstream's. The
+  bulk path still resolves edges concurrently.
+- `Graphiti` has a class-level `max_coroutines` default.
+
 ## 0.30.2.post7 — 2026-10-11
 
 Maintenance release on the same upstream Graphiti 0.30.2 base.
