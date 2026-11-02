@@ -32,7 +32,7 @@ from ..errors import GraphitiRequestTooLargeError
 from ..prompts.models import Message
 from .client import LLMClient, get_extraction_language_instruction, is_server_or_retry_error
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
-from .errors import EmptyResponseError, RateLimitError
+from .errors import EmptyResponseError, OutputTruncatedError, RateLimitError
 from .request_guard import (
     RequestGuard,
     build_request_context,
@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = 'gpt-4.1-mini'
 
 StructuredOutputMode = Literal['json_schema', 'json_object']
+
+# Group 1 ends just before the document. Prose such as "{broken" or "[Note]" doesn't match.
+_JSON_DOCUMENT_START = re.compile(r'(\s*)(?:\{\s*"|\[\s*[\{\["])')
 
 
 class OpenAIGenericClient(LLMClient):
@@ -175,6 +178,10 @@ class OpenAIGenericClient(LLMClient):
         text is returned so the caller's ``json.loads`` raises the original
         ``JSONDecodeError`` — preserving the existing retry semantics for genuinely
         retryable parse failures.
+
+        A reply that opens as a JSON document is decoded only from its start. Scanning
+        inside it would return a nested fragment of a broken or cut-off document as if it
+        were the whole payload.
         """
         try:
             json.loads(text)
@@ -182,6 +189,14 @@ class OpenAIGenericClient(LLMClient):
         except json.JSONDecodeError:
             pass
         decoder = json.JSONDecoder()
+        document_start = _JSON_DOCUMENT_START.match(text)
+        if document_start is not None:
+            start = document_start.end(1)
+            try:
+                _, end = decoder.raw_decode(text, start)
+            except json.JSONDecodeError:
+                return text
+            return text[start:end]
         for index, char in enumerate(text):
             if char not in '{[':
                 continue
@@ -284,8 +299,14 @@ class OpenAIGenericClient(LLMClient):
                     guard.lifecycle_hook.on_request_completed(context, response_metadata)
             if not choices:
                 raise EmptyResponseError('LLM returned a response with no choices')
-            # An empty body (refusal, length finish_reason, or a flaky endpoint) would make
-            # json.loads raise a cryptic JSONDecodeError; surface a clear error instead.
+            # Checked before parsing: the visible text may be empty when reasoning used the
+            # whole budget, and a cut-off payload must never reach the salvage scan below.
+            if getattr(choices[0], 'finish_reason', None) == 'length':
+                raise OutputTruncatedError(
+                    f'LLM output reached the output token limit (max_tokens={max_tokens})'
+                )
+            # An empty body (refusal or a flaky endpoint) would make json.loads raise a
+            # cryptic JSONDecodeError; surface a clear error instead.
             if not result:
                 raise EmptyResponseError('LLM returned an empty response')
             # Many OpenAI-compatible/local models wrap JSON in a ```json fence even under a

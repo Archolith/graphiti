@@ -1,5 +1,13 @@
 # Changelog — graphiti
 
+## 2026-11-02 — Treat cut-off LLM replies as truncation
+
+- `llm_client/openai_generic_client.py`: `finish_reason=length` raises `OutputTruncatedError`
+  before parsing. A reply that opens as a JSON document is decoded only from its start, so a
+  nested fragment can't be returned as the payload. Prose-wrapped replies still get the scan.
+- `llm_client/errors.py`, `llm_client/__init__.py`: add and export `OutputTruncatedError`.
+- `tests/llm_client/test_openai_generic_client_truncation.py`: cut-off and malformed reply shapes.
+
 ## 2026-10-23 — Merge upstream graphiti-core 0.31.2 into `menhir/main`
 
 - Merge `getzep/graphiti` `main` @ `3ffc978` (graphiti-core 0.31.2; merge base `eaa41286`) on
