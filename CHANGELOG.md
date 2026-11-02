@@ -5,6 +5,31 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.31.2.post2 — 2026-11-02
+
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.31.2.post2) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.31.2.post2/)
+
+### Added
+
+- `OutputTruncatedError` (`graphiti_core/llm_client/errors.py`, exported from
+  `graphiti_core.llm_client`). `OpenAIGenericClient` raises it when a reply stops at the
+  output token limit (`finish_reason=length`). It isn't retried at the same limit; callers
+  can retry with a higher one ([#20](https://github.com/Archolith/graphiti/pull/20)).
+
+### Changed
+
+- A reply with `finish_reason=length` and an empty body now raises `OutputTruncatedError`
+  instead of `EmptyResponseError`, so `OpenAIGenericClient.generate_response` no longer
+  retries it at the same limit.
+
+### Fixed
+
+- `OpenAIGenericClient` no longer returns a nested fragment of a broken or cut-off JSON
+  document as the payload. A reply that opens as a JSON document is decoded only from its
+  start. Prose-wrapped replies are still scanned, so one that is also cut off can still
+  return a fragment if the provider doesn't report `length`.
+
 ## 0.31.2.post1 — 2026-10-23
 
 Rebased onto upstream Graphiti 0.31.2 (`getzep/graphiti` main at `3ffc978`); every fork

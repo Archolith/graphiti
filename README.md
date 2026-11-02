@@ -46,13 +46,13 @@ The upstream installation command below installs upstream Graphiti, not this for
 See the [Archolith fork changelog](CHANGELOG.md) for release-specific changes.
 
 To install the Archolith fork after publication, use
-`pip install archolith-graphiti-core==0.31.2.post1` (or add the same exact version
+`pip install archolith-graphiti-core==0.31.2.post2` (or add the same exact version
 with `uv`). Do not install it alongside upstream `graphiti-core`: both provide
 the `graphiti_core` import package.
 
 - **Purpose:** a maintenance line that tracks upstream Graphiti while carrying Menhir-specific policy divergences.
 - **Baseline:** upstream `getzep/graphiti` `main` at exact commit `3ffc978` (graphiti-core `0.31.2`; the six commits after the `v0.31.2` tag do not touch `graphiti_core`).
-- **Release source:** tag `v0.31.2.post1` records the reviewed fork commit used for the public wheel.
+- **Release source:** tag `v0.31.2.post2` records the reviewed fork commit used for the public wheel.
 - **Remotes:** `origin` is `Archolith/graphiti` (the public fork); `upstream` is `getzep/graphiti`.
 - **Consumer pinning:** Menhir consumes an exact fork distribution version and verifies the PyPI artifact hash;
   each release is traced to a reviewed fork commit. Never consume a moving branch or tag.
