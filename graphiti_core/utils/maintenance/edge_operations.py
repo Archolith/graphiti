@@ -258,7 +258,7 @@ async def extract_edges(
         max_tokens=extract_edges_max_tokens,
         group_id=group_id or primary_episode.group_id,
     )
-    all_edges_data = ExtractedEdges(**llm_response).edges
+    all_edges_data = ExtractedEdges.model_validate(llm_response).edges
 
     edge_group_id = group_id or primary_episode.group_id
 
@@ -1053,7 +1053,7 @@ async def _extract_edge_timestamps(
             response_model=EdgeTimestamps,
             model_size=ModelSize.small,
         )
-        timestamps = EdgeTimestamps(**llm_response)
+        timestamps = EdgeTimestamps.model_validate(llm_response)
         apply_extracted_timestamps(
             edge,
             timestamps.valid_at,
@@ -1245,7 +1245,7 @@ async def _dedupe_extracted_edge(
         response_model=EdgeDuplicate,
         model_size=ModelSize.small,
     )
-    response_object = EdgeDuplicate(**llm_response)
+    response_object = EdgeDuplicate.model_validate(llm_response)
     duplicate_facts = response_object.duplicate_facts
 
     # Validate duplicate_facts are in valid range for EXISTING FACTS

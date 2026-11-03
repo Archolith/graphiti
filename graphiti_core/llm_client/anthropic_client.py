@@ -415,7 +415,7 @@ class AnthropicClient(LLMClient):
                     # If we have a response_model, attempt to validate the response
                     if response_model is not None:
                         # Validate the response against the response_model
-                        model_instance = response_model(**response)
+                        model_instance = response_model.model_validate(response)
                         return model_instance.model_dump()
 
                     # If no validation needed, return the response
