@@ -172,7 +172,7 @@ async def extract_nodes_and_edges(
         response_model=CombinedExtraction,
         group_id=primary_episode.group_id,
     )
-    response_object = CombinedExtraction(**llm_response)
+    response_object = CombinedExtraction.model_validate(llm_response)
 
     end = time()
     logger.debug(
