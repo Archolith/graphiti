@@ -65,6 +65,7 @@ from graphiti_core.search.search_config import SearchResults
 from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.datetime_utils import ensure_utc, utc_now
+from graphiti_core.utils.llm_response import parse_llm_response
 from graphiti_core.utils.maintenance.attribute_utils import apply_capped_attributes
 from graphiti_core.utils.maintenance.dangling_endpoints import (
     materialize_dangling_endpoint_node,
@@ -258,7 +259,7 @@ async def extract_edges(
         max_tokens=extract_edges_max_tokens,
         group_id=group_id or primary_episode.group_id,
     )
-    all_edges_data = ExtractedEdges(**llm_response).edges
+    all_edges_data = parse_llm_response(ExtractedEdges, llm_response).edges
 
     edge_group_id = group_id or primary_episode.group_id
 
@@ -1053,7 +1054,7 @@ async def _extract_edge_timestamps(
             response_model=EdgeTimestamps,
             model_size=ModelSize.small,
         )
-        timestamps = EdgeTimestamps(**llm_response)
+        timestamps = parse_llm_response(EdgeTimestamps, llm_response)
         apply_extracted_timestamps(
             edge,
             timestamps.valid_at,
@@ -1245,7 +1246,7 @@ async def _dedupe_extracted_edge(
         response_model=EdgeDuplicate,
         model_size=ModelSize.small,
     )
-    response_object = EdgeDuplicate(**llm_response)
+    response_object = parse_llm_response(EdgeDuplicate, llm_response)
     duplicate_facts = response_object.duplicate_facts
 
     # Validate duplicate_facts are in valid range for EXISTING FACTS

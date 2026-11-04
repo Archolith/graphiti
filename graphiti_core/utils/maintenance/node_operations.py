@@ -61,6 +61,7 @@ from graphiti_core.prompts.prompt_helpers import without_merge_lineage
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.search.search_utils import node_similarity_search
 from graphiti_core.utils.datetime_utils import utc_now
+from graphiti_core.utils.llm_response import parse_llm_response
 from graphiti_core.utils.maintenance.attribute_utils import apply_capped_attributes
 from graphiti_core.utils.maintenance.dedup_helpers import (
     DedupCandidateIndexes,
@@ -311,7 +312,7 @@ async def _extract_nodes_single(
 ) -> list[ExtractedEntity]:
     """Extract entities using a single LLM call."""
     llm_response = await _call_extraction_llm(llm_client, episode, context, clients=clients)
-    response_object = ExtractedEntities(**llm_response)
+    response_object = parse_llm_response(ExtractedEntities, llm_response)
     return response_object.extracted_entities
 
 
@@ -795,7 +796,9 @@ async def _resolve_with_llm(
         max_tokens=dedupe_nodes_max_tokens,
     )
 
-    node_resolutions: list[NodeDuplicate] = NodeResolutions(**llm_response).entity_resolutions
+    node_resolutions: list[NodeDuplicate] = parse_llm_response(
+        NodeResolutions, llm_response
+    ).entity_resolutions
 
     valid_relative_range = range(len(state.unresolved_indices))
     processed_relative_ids: set[int] = set()
@@ -1517,7 +1520,7 @@ async def _process_summary_flight(
         name_to_nodes[key].append(node)
 
     # Apply summaries from LLM response
-    summaries_response = SummarizedEntities(**llm_response)
+    summaries_response = parse_llm_response(SummarizedEntities, llm_response)
     for summarized_entity in summaries_response.summaries:
         matching_nodes = name_to_nodes.get(summarized_entity.name.lower(), [])
         if matching_nodes:

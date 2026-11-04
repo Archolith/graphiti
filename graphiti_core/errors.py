@@ -104,3 +104,13 @@ class NodeLabelValidationError(GraphitiError, ValueError):
             f'alphanumeric characters or underscores: {label_list}'
         )
         super().__init__(self.message)
+
+
+class LLMResponseValidationError(GraphitiError, ValueError):
+    """Raised when an LLM response is not a JSON object matching the expected model."""
+
+    def __init__(self, model_name: str, received_type: str):
+        self.model_name = model_name
+        self.received_type = received_type
+        self.message = f'LLM response for {model_name} must be a JSON object, got {received_type}'
+        super().__init__(self.message)

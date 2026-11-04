@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import BaseModel
 
+from graphiti_core.errors import LLMResponseValidationError
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.prompts.extract_nodes_and_edges import (
@@ -672,3 +673,18 @@ async def test_combined_extraction_dates_facts_in_groups():
     assert len(edges) == fact_count
     assert sorted(group_sizes) == sorted([TIMESTAMP_BATCH_SIZE, TIMESTAMP_BATCH_SIZE, 5])
     assert all(edge.valid_at is not None for edge in edges)
+
+
+@pytest.mark.asyncio
+async def test_combined_extraction_list_response_raises_validation_error():
+    clients, llm_generate = _make_clients()
+    llm_generate.side_effect = [[{'name': 'Acme Robotics'}, {'name': 'Atlas launch'}]]
+
+    with pytest.raises(LLMResponseValidationError):
+        await extract_nodes_and_edges(
+            clients,
+            _make_episode(),
+            previous_episodes=[],
+            entity_types=None,
+            excluded_entity_types=None,
+        )

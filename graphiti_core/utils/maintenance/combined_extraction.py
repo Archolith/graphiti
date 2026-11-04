@@ -29,6 +29,7 @@ from graphiti_core.prompts import prompt_library
 from graphiti_core.prompts.extract_edges import BatchEdgeTimestamps
 from graphiti_core.prompts.extract_nodes_and_edges import CombinedExtraction, CombinedFact
 from graphiti_core.utils.datetime_utils import utc_now
+from graphiti_core.utils.llm_response import parse_llm_response
 from graphiti_core.utils.maintenance.dangling_endpoints import materialize_dangling_endpoint_node
 from graphiti_core.utils.maintenance.dedup_helpers import _normalize_string_exact
 from graphiti_core.utils.maintenance.node_operations import (
@@ -172,7 +173,7 @@ async def extract_nodes_and_edges(
         response_model=CombinedExtraction,
         group_id=primary_episode.group_id,
     )
-    response_object = CombinedExtraction(**llm_response)
+    response_object = parse_llm_response(CombinedExtraction, llm_response)
 
     end = time()
     logger.debug(
