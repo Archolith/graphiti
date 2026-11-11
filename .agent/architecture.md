@@ -402,6 +402,26 @@ the same answer for every copy. Known limits: `add_triplet` passes a synthetic e
 source signal), and bulk pass 1 (`dedupe_edges_bulk`) resolves unsaved in-batch edges, whose
 source a host can only infer from `target_edge.episodes`. Tests: `tests/test_edge_invalidation.py`.
 
+## Publish Fence: Host Hook Inside the Publish Transaction (native, fork; Menhir policy divergence)
+
+`add_episode` persists the episode and its derived entity nodes and edges in one managed
+transaction (`add_nodes_and_edges_bulk_tx`). A neutral `PublishFence` Protocol
+(`graphiti_core/publish_fence.py`: `before_write(tx, *, episode_uuid, previous_episode_uuids)` and
+`after_write(tx, *, episode_uuid, entity_node_uuids, entity_edge_uuids, previous_episode_uuids)`)
+lets the host run its own statements on that same `tx`. `before_write` runs after the embedding
+loops and before the first save (one call site ahead of the interface, Kuzu and Neo4j branches);
+`after_write` runs after the last save. A raise rolls the whole transaction back, and both must be
+idempotent because the driver can retry a managed transaction.
+
+`add_episode(new_episode_uuid=..., publish_fence=...)`: `new_episode_uuid` names the newly created
+`EpisodicNode` (`uuid=` still loads an existing one; both together raise `ValueError`).
+`previous_episode_uuids` handed to the fence is `[ep.uuid for ep in previous_episodes]` as retrieved,
+not the caller's `previous_episode_uuids` request. `publish_fence` with `saga` or
+`update_communities` raises `ValueError`: both write outside the transaction. The fence kwargs are
+forwarded through `_process_episode_data` and `add_nodes_and_edges_bulk(_tx)` only when a fence is
+set (`publish_fence_kwargs`), so with no fence every call and every Cypher statement is unchanged.
+Tests: `tests/test_publish_fence.py` (unit with a fake tx; `_int` tests against Neo4j).
+
 ## Untyped Attribute Preservation in Attribute Extraction (fork half of installer #15)
 
 `node_operations._extract_entity_attributes` is the single boundary where node attributes

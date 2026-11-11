@@ -16,7 +16,7 @@ limitations under the License.
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from time import time
 from typing import Any
@@ -83,6 +83,7 @@ from graphiti_core.prompts.lib import (
     validate_prompt_library,
 )
 from graphiti_core.prompts.summarize_sagas import SagaSummary
+from graphiti_core.publish_fence import PublishFence, publish_fence_kwargs
 from graphiti_core.search.search import SearchConfig, search
 from graphiti_core.search.search_config import DEFAULT_SEARCH_LIMIT, SearchResults
 from graphiti_core.search.search_config_recipes import (
@@ -1233,6 +1234,8 @@ class Graphiti:
         saga_previous_episode_uuid: str | None = None,
         node_episode_index_map: dict[str, list[int]] | None = None,
         clients: GraphitiClients | None = None,
+        publish_fence: PublishFence | None = None,
+        previous_episode_uuids: Sequence[str] | None = None,
     ) -> tuple[list[EpisodicEdge], EpisodicNode]:
         """Process and save episode data to the graph.
 
@@ -1263,6 +1266,10 @@ class Graphiti:
             Optional request-scoped clients bundle. Defaults to ``self.clients``.
             Callers pass a per-request bundle so concurrent calls for different
             group_ids target the correct database (issue #1676).
+        publish_fence : PublishFence | None
+            Optional. Runs inside the publish transaction (see
+            :mod:`graphiti_core.publish_fence`) together with ``previous_episode_uuids``,
+            the context episodes the caller actually retrieved.
         """
         clients = clients or self.clients
         driver = clients.driver
@@ -1282,6 +1289,7 @@ class Graphiti:
             nodes,
             entity_edges,
             clients.embedder,
+            **publish_fence_kwargs(publish_fence, episodes[0].uuid, previous_episode_uuids),
         )
 
         primary_episode = episodes[0]
@@ -1622,6 +1630,8 @@ class Graphiti:
         custom_extraction_instructions: str | None = None,
         saga: str | SagaNode | None = None,
         saga_previous_episode_uuid: str | None = None,
+        new_episode_uuid: str | None = None,
+        publish_fence: PublishFence | None = None,
     ) -> AddEpisodeResults:
         """
         Process an episode and update the graph.
@@ -1669,6 +1679,14 @@ class Graphiti:
             query to find the most recent episode. Useful for efficiently adding multiple episodes
             to the same saga in sequence. The returned AddEpisodeResults.episode.uuid can be passed
             as this parameter for the next episode.
+        new_episode_uuid : str | None
+            Optional. Names the newly created EpisodicNode. ``uuid`` keeps its meaning (load an
+            existing episode); passing both raises ValueError.
+        publish_fence : PublishFence | None
+            Optional. Hook that runs inside the single publish transaction, before and after the
+            graph writes (see :mod:`graphiti_core.publish_fence`). Raising rolls the whole
+            episode back. Incompatible with ``saga`` and ``update_communities``, which write
+            outside the transaction (ValueError).
 
         Returns
         -------
@@ -1698,6 +1716,14 @@ class Graphiti:
                 background_tasks.add_task(graphiti.add_episode, **episode_data.dict())
                 return {"message": "Episode processing started"}
         """
+        if uuid is not None and new_episode_uuid is not None:
+            raise ValueError('uuid and new_episode_uuid are mutually exclusive')
+        if publish_fence is not None and (saga is not None or update_communities):
+            raise ValueError(
+                'publish_fence cannot be combined with saga or update_communities: '
+                'they write outside the publish transaction'
+            )
+
         start = time()
         now = utc_now()
 
@@ -1723,12 +1749,15 @@ class Graphiti:
                     if previous_episode_uuids is None
                     else await EpisodicNode.get_by_uuids(driver, previous_episode_uuids)
                 )
+                # The context episodes actually used (the parameter above is only the caller's
+                # request), reported to the publish fence.
+                fence_previous_episode_uuids = [ep.uuid for ep in previous_episodes]
 
                 # Get or create episode
-                episode = (
-                    await EpisodicNode.get_by_uuid(driver, uuid)
-                    if uuid is not None
-                    else EpisodicNode(
+                if uuid is not None:
+                    episode = await EpisodicNode.get_by_uuid(driver, uuid)
+                else:
+                    episode = EpisodicNode(
                         name=name,
                         group_id=group_id,
                         labels=[],
@@ -1738,7 +1767,8 @@ class Graphiti:
                         created_at=now,
                         valid_at=reference_time,
                     )
-                )
+                    if new_episode_uuid is not None:
+                        episode.uuid = new_episode_uuid
 
                 # Create default edge type map
                 edge_type_map_default = (
@@ -1834,6 +1864,14 @@ class Graphiti:
                     saga_previous_episode_uuid,
                     node_episode_index_map,
                     clients=clients,
+                    **(
+                        {}
+                        if publish_fence is None
+                        else {
+                            'publish_fence': publish_fence,
+                            'previous_episode_uuids': fence_previous_episode_uuids,
+                        }
+                    ),
                 )
 
                 # Update communities if requested

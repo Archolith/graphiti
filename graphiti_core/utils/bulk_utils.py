@@ -17,6 +17,7 @@ limitations under the License.
 import json
 import logging
 import typing
+from collections.abc import Sequence
 from datetime import datetime
 
 import numpy as np
@@ -46,6 +47,7 @@ from graphiti_core.models.nodes.node_db_queries import (
 )
 from graphiti_core.node_pre_resolution import NodePreResolutionHook
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
+from graphiti_core.publish_fence import PublishFence, publish_fence_kwargs
 from graphiti_core.utils.datetime_utils import convert_datetimes_to_strings
 from graphiti_core.utils.maintenance.dedup_helpers import (
     DedupResolutionState,
@@ -141,6 +143,9 @@ async def add_nodes_and_edges_bulk(
     entity_nodes: list[EntityNode],
     entity_edges: list[EntityEdge],
     embedder: EmbedderClient,
+    publish_fence: PublishFence | None = None,
+    fence_episode_uuid: str | None = None,
+    previous_episode_uuids: Sequence[str] | None = None,
 ):
     session = driver.session()
     try:
@@ -152,6 +157,7 @@ async def add_nodes_and_edges_bulk(
             entity_edges,
             embedder,
             driver=driver,
+            **publish_fence_kwargs(publish_fence, fence_episode_uuid, previous_episode_uuids),
         )
     finally:
         await session.close()
@@ -165,6 +171,9 @@ async def add_nodes_and_edges_bulk_tx(
     entity_edges: list[EntityEdge],
     embedder: EmbedderClient,
     driver: GraphDriver,
+    publish_fence: PublishFence | None = None,
+    fence_episode_uuid: str | None = None,
+    previous_episode_uuids: Sequence[str] | None = None,
 ):
     episodes = [dict(episode) for episode in episodic_nodes]
     for episode in episodes:
@@ -231,6 +240,19 @@ async def add_nodes_and_edges_bulk_tx(
 
         edges.append(edge_data)
 
+    fence_uuid = fence_episode_uuid
+    if publish_fence is not None:
+        if fence_uuid is None and episodic_nodes:
+            fence_uuid = episodic_nodes[0].uuid
+        if fence_uuid is None:
+            raise ValueError('publish_fence requires an episode uuid')
+        # Runs before the first save on every branch below (interface, Kuzu, Neo4j).
+        await publish_fence.before_write(
+            tx,
+            episode_uuid=fence_uuid,
+            previous_episode_uuids=list(previous_episode_uuids or []),
+        )
+
     if driver.graph_operations_interface:
         await driver.graph_operations_interface.episodic_node_save_bulk(None, driver, tx, episodes)
         await driver.graph_operations_interface.node_save_bulk(None, driver, tx, nodes)
@@ -266,6 +288,15 @@ async def add_nodes_and_edges_bulk_tx(
         await tx.run(
             get_entity_edge_save_bulk_query(driver.provider),
             entity_edges=edges,
+        )
+
+    if publish_fence is not None and fence_uuid is not None:
+        await publish_fence.after_write(
+            tx,
+            episode_uuid=fence_uuid,
+            entity_node_uuids=[node.uuid for node in entity_nodes],
+            entity_edge_uuids=[edge.uuid for edge in entity_edges],
+            previous_episode_uuids=list(previous_episode_uuids or []),
         )
 
 
