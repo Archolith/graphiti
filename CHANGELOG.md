@@ -5,7 +5,10 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
-## Unreleased
+## 0.31.2.post3 — 2026-11-11
+
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.31.2.post3) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.31.2.post3/)
 
 ### Added
 
