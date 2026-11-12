@@ -46,7 +46,7 @@ The upstream installation command below installs upstream Graphiti, not this for
 See the [Archolith fork changelog](CHANGELOG.md) for release-specific changes.
 
 To install the Archolith fork after publication, use
-`pip install archolith-graphiti-core==0.31.2.post2` (or add the same exact version
+`pip install archolith-graphiti-core==0.31.2.post3` (or add the same exact version
 with `uv`). Do not install it alongside upstream `graphiti-core`: both provide
 the `graphiti_core` import package.
 

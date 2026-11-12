@@ -1,5 +1,18 @@
 # Changelog — graphiti
 
+## 2026-11-10 — Publish fence hook and caller-supplied episode uuid (Menhir policy divergence)
+
+- `publish_fence.py` (new): neutral `PublishFence` Protocol (`before_write`, `after_write`) and
+  `publish_fence_kwargs`.
+- `utils/bulk_utils.py`: `add_nodes_and_edges_bulk(_tx)` take `publish_fence`, `fence_episode_uuid`,
+  `previous_episode_uuids`; `before_write` runs after the embedding loops and before the first save,
+  `after_write` after the last save, inside the same transaction. No fence, no change.
+- `graphiti.py`: `add_episode(new_episode_uuid=, publish_fence=)`; captures the retrieved
+  `previous_episodes` uuids and threads them through `_process_episode_data`. `ValueError` for
+  `uuid` + `new_episode_uuid`, and for `publish_fence` + `saga` / `update_communities`.
+- `tests/test_publish_fence.py`: unit tests with a fake tx and Neo4j `_int` tests (rollback,
+  atomic hook write, retry).
+
 ## 2026-11-02 — Treat cut-off LLM replies as truncation
 
 - `llm_client/openai_generic_client.py`: `finish_reason=length` raises `OutputTruncatedError`

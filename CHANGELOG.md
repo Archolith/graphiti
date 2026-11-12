@@ -5,6 +5,20 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.31.2.post3 — 2026-11-11
+
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.31.2.post3) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.31.2.post3/)
+
+### Added
+
+- `PublishFence` hook (`graphiti_core/publish_fence.py`) and `add_episode(new_episode_uuid=...,
+  publish_fence=...)`. The fence's `before_write` and `after_write` run inside the single publish
+  transaction, so a raise rolls the episode back. `new_episode_uuid` names the new
+  `EpisodicNode`. The fence receives the context episode uuids actually retrieved. Combining
+  `publish_fence` with `saga` or `update_communities` raises `ValueError`. With no fence, behavior
+  and Cypher are unchanged. Label: `Menhir policy divergence`.
+
 ## 0.31.2.post2 — 2026-11-02
 
 [Source tag](https://github.com/Archolith/graphiti/tree/v0.31.2.post2) ·
