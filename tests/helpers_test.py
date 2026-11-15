@@ -179,6 +179,9 @@ def mock_embedder():
             raise ValueError(f'Unsupported input type: {type(input_data)}')
 
     mock_model.create.side_effect = mock_embed
+    # Edge fact embedding goes through create_batch; without this the spec'd AsyncMock returns an
+    # empty MagicMock and create_entity_edge_embeddings fails its strict zip.
+    mock_model.create_batch.side_effect = lambda inputs: [embeddings[text] for text in inputs]
     return mock_model
 
 

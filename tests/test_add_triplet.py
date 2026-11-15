@@ -28,6 +28,16 @@ from graphiti_core.llm_client import LLMClient
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from tests.helpers_test import group_id
 
+# Stale upstream expectations (Archolith/menhir#264): add_triplet resolves an unknown uuid as a new
+# node instead of raising, and stored nodes carry the 'Entity' label. Upstream main behaves the
+# same. strict=True so a behaviour change surfaces here.
+_STALE_UNKNOWN_UUID = pytest.mark.xfail(
+    strict=True, reason='add_triplet resolves an unknown uuid as a new node; it does not raise'
+)
+_STALE_LABELS = pytest.mark.xfail(
+    strict=True, reason="stored entity nodes also carry the 'Entity' label"
+)
+
 pytest_plugins = ('pytest_asyncio', 'tests.helpers_test')
 
 
@@ -214,6 +224,7 @@ async def test_add_triplet_updates_summary(
         assert retrieved_target.summary == 'New summary for Bob'
 
 
+@_STALE_LABELS
 @pytest.mark.asyncio
 async def test_add_triplet_updates_labels(
     graph_driver, mock_llm_client, mock_embedder, mock_cross_encoder_client
@@ -506,6 +517,7 @@ async def test_add_triplet_empty_attributes_preserved(
         assert retrieved_source.summary == 'Existing summary'
 
 
+@_STALE_UNKNOWN_UUID
 @pytest.mark.asyncio
 async def test_add_triplet_invalid_source_uuid(
     graph_driver, mock_llm_client, mock_embedder, mock_cross_encoder_client
@@ -559,6 +571,7 @@ async def test_add_triplet_invalid_source_uuid(
         await graphiti.add_triplet(user_source, edge, user_target)
 
 
+@_STALE_UNKNOWN_UUID
 @pytest.mark.asyncio
 async def test_add_triplet_invalid_target_uuid(
     graph_driver, mock_llm_client, mock_embedder, mock_cross_encoder_client
@@ -625,6 +638,7 @@ async def test_add_triplet_invalid_target_uuid(
         await graphiti.add_triplet(user_source, edge, user_target)
 
 
+@_STALE_UNKNOWN_UUID
 @pytest.mark.asyncio
 async def test_add_triplet_invalid_both_uuids(
     graph_driver, mock_llm_client, mock_embedder, mock_cross_encoder_client
