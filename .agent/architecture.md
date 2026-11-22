@@ -318,7 +318,11 @@ reconciles: `add_nodes_and_edges_bulk_tx` and the Neo4j, FalkorDB and Neptune dr
 `reconcile_edge_copies(edges, [])` before building rows (a no-op for reconciled callers), so
 a caller that skips reconciliation cannot leave the stored end to row order (menhir#262).
 `add_triplet` never offers an edge's own stored copy as an invalidation candidate for its
-update (menhir#251).
+update, and `_dedupe_extracted_edge` drops any contradicted candidate with the uuid of the edge
+being saved (the resolved edge), which covers the stored copy returned by the same-pair search;
+an update that resolves to a different edge can still invalidate its own old copy (menhir#251;
+`tests/test_add_triplet_self_candidate.py`, live `tests/test_add_triplet_self_candidate_int.py`).
+Dedupe against that copy is unchanged.
 
 Caller-preserved edge attributes: a fetched stored edge carries every row property in
 `attributes` (`properties(e) AS attributes`), and `EntityEdge.save` writes `attributes` back as
