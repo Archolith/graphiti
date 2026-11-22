@@ -828,6 +828,28 @@ def reconcile_edge_copies(
                 edge.attributes = dict(attributes)
 
 
+def _apply_update_to_own_copy(resolved_edge: EntityEdge, update: EntityEdge) -> None:
+    """Archolith fork: an update by uuid wins over its own stored copy chosen as its duplicate.
+
+    add_triplet with an existing uuid: dedupe may resolve the update to that edge's stored copy,
+    which kept the stored fact and dropped the update. The update's fact, name and attributes win.
+    The validity window is one value: an update that sets either end replaces both (as on the
+    non-duplicate path), else the stored window stays; mixing them could end it before it starts.
+    The stored copy keeps created_at, expiry and the merged episodes.
+    """
+    if resolved_edge is update or resolved_edge.uuid != update.uuid:
+        return
+    resolved_edge.fact = update.fact
+    resolved_edge.name = update.name
+    resolved_edge.fact_embedding = update.fact_embedding
+    if update.valid_at is not None or update.invalid_at is not None:
+        resolved_edge.valid_at = update.valid_at
+        resolved_edge.invalid_at = update.invalid_at
+    if update.reference_time is not None:
+        resolved_edge.reference_time = update.reference_time
+    resolved_edge.attributes = {**(resolved_edge.attributes or {}), **(update.attributes or {})}
+
+
 def _contradiction_invalidates(edge: EntityEdge, resolved_edge: EntityEdge) -> bool:
     """True when ``resolved_edge`` invalidates ``edge`` (the mutating branch below)."""
     # (Edge invalid before new edge becomes valid) or (new edge invalid before edge becomes valid)
@@ -1158,6 +1180,7 @@ async def _dedupe_extracted_edge(
         for episode_uuid in [*extracted_edge.episodes, episode.uuid]:
             if episode_uuid not in resolved_edge.episodes:
                 resolved_edge.episodes.append(episode_uuid)
+        _apply_update_to_own_copy(resolved_edge, extracted_edge)
 
     # Nothing to compare against, so there is no duplicate and nothing to contradict.
     if len(related_edges) == 0 and len(existing_edges) == 0:
