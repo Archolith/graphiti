@@ -1291,6 +1291,19 @@ async def _dedupe_extracted_edge(
                 # From FACT INVALIDATION CANDIDATES (adjust index by offset)
                 invalidation_candidates.append(existing_edges[idx - invalidation_idx_offset])
 
+        # Archolith fork (menhir#251): an edge never contradicts its own stored copy. On an
+        # update by uuid (add_triplet) the same-pair search returns that copy; invalidating it
+        # would send two copies with different facts to the save, which keeps the old fact.
+        self_copies = [c for c in invalidation_candidates if c.uuid == extracted_edge.uuid]
+        if self_copies:
+            logger.info(
+                'Dropped the stored copy of edge %s from its own invalidation candidates',
+                extracted_edge.uuid,
+            )
+            invalidation_candidates = [
+                c for c in invalidation_candidates if c.uuid != extracted_edge.uuid
+            ]
+
     # Only extract structured attributes if the edge's relation_type matches an allowed custom type
     # AND the edge model exists for this node pair signature
     # Stored values of caller-owned keys on a duplicate; a new edge clears as upstream.
