@@ -52,6 +52,8 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
             'expired_at': edge.expired_at,
             'valid_at': edge.valid_at,
             'invalid_at': edge.invalid_at,
+            # Archolith fork: the Kuzu save query sets e.reference_time (menhir#260).
+            'reference_time': edge.reference_time,
             'attributes': json.dumps(edge.attributes or {}),
         }
 

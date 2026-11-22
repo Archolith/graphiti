@@ -369,32 +369,19 @@ class EntityEdge(Edge):
             except NotImplementedError:
                 pass
 
-        edge_data: dict[str, Any] = {
-            'source_uuid': self.source_node_uuid,
-            'target_uuid': self.target_node_uuid,
-            'uuid': self.uuid,
-            'name': self.name,
-            'group_id': self.group_id,
-            'fact': self.fact,
-            'fact_embedding': self.fact_embedding,
-            'episodes': self.episodes,
-            'created_at': self.created_at,
-            'expired_at': self.expired_at,
-            'valid_at': self.valid_at,
-            'invalid_at': self.invalid_at,
-            'reference_time': self.reference_time,
-        }
-
         if driver.provider == GraphProvider.KUZU:
+            edge_data = entity_edge_save_row(
+                self, source_key='source_uuid', target_key='target_uuid', with_attributes=False
+            )
             edge_data['attributes'] = json.dumps(self.attributes)
             result = await driver.execute_query(
                 get_entity_edge_save_query(driver.provider),
                 **edge_data,
             )
         else:
-            for k, v in (self.attributes or {}).items():
-                if k not in edge_data:
-                    edge_data[k] = v
+            edge_data = entity_edge_save_row(
+                self, source_key='source_uuid', target_key='target_uuid'
+            )
             result = await driver.execute_query(
                 get_entity_edge_save_query(driver.provider),
                 edge_data=edge_data,
@@ -993,6 +980,41 @@ def get_episodic_edge_from_record(record: Any) -> EpisodicEdge:
         target_node_uuid=record['target_node_uuid'],
         created_at=parse_db_date(record['created_at']),  # type: ignore
     )
+
+
+def entity_edge_save_row(
+    edge: EntityEdge,
+    *,
+    source_key: str = 'source_node_uuid',
+    target_key: str = 'target_node_uuid',
+    with_attributes: bool = True,
+) -> dict[str, Any]:
+    """The row a full-replace entity-edge save writes.
+
+    Archolith fork: every save path builds its row here, so none drops a core field (upstream
+    driver ops omitted reference_time, menhir#260) and no attribute replaces one. Attributes can
+    hold stale string copies of typed fields, so a core field always wins over an attribute.
+    """
+    row: dict[str, Any] = {
+        'uuid': edge.uuid,
+        source_key: edge.source_node_uuid,
+        target_key: edge.target_node_uuid,
+        'name': edge.name,
+        'fact': edge.fact,
+        'fact_embedding': edge.fact_embedding,
+        'group_id': edge.group_id,
+        'episodes': edge.episodes,
+        'created_at': edge.created_at,
+        'expired_at': edge.expired_at,
+        'valid_at': edge.valid_at,
+        'invalid_at': edge.invalid_at,
+        'reference_time': edge.reference_time,
+    }
+    if with_attributes:
+        for key, value in (edge.attributes or {}).items():
+            if key not in row:
+                row[key] = value
+    return row
 
 
 def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityEdge:

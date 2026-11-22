@@ -2500,7 +2500,12 @@ class Graphiti:
         # invalidation list so the LLM is not shown the same fact under two
         # indices. Mirrors resolve_extracted_edges' overlap dedup.
         related_uuids = {related_edge.uuid for related_edge in related_edges}
-        existing_edges = [e for e in existing_edges if e.uuid not in related_uuids]
+        # Archolith fork: an update by an existing uuid never meets its own stored copy as an
+        # invalidation candidate; two copies with different facts would reach the save, and the
+        # last row would win (menhir#251).
+        existing_edges = [
+            e for e in existing_edges if e.uuid not in related_uuids and e.uuid != edge.uuid
+        ]
 
         dedupe_episode = (
             episode

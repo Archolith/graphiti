@@ -15,13 +15,12 @@ limitations under the License.
 """
 
 import logging
-from typing import Any
 
 from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.entity_edge_ops import EntityEdgeOperations
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
 from graphiti_core.driver.record_parsers import entity_edge_from_record
-from graphiti_core.edges import EntityEdge
+from graphiti_core.edges import EntityEdge, entity_edge_save_row
 from graphiti_core.errors import EdgeNotFoundError
 from graphiti_core.models.edges.edge_db_queries import (
     get_entity_edge_return_query,
@@ -39,21 +38,7 @@ class NeptuneEntityEdgeOperations(EntityEdgeOperations):
         edge: EntityEdge,
         tx: Transaction | None = None,
     ) -> None:
-        edge_data: dict[str, Any] = {
-            'uuid': edge.uuid,
-            'source_uuid': edge.source_node_uuid,
-            'target_uuid': edge.target_node_uuid,
-            'name': edge.name,
-            'fact': edge.fact,
-            'fact_embedding': edge.fact_embedding,
-            'group_id': edge.group_id,
-            'episodes': edge.episodes,
-            'created_at': edge.created_at,
-            'expired_at': edge.expired_at,
-            'valid_at': edge.valid_at,
-            'invalid_at': edge.invalid_at,
-        }
-        edge_data.update(edge.attributes or {})
+        edge_data = entity_edge_save_row(edge, source_key='source_uuid', target_key='target_uuid')
 
         query = get_entity_edge_save_query(GraphProvider.NEPTUNE)
         if tx is not None:
@@ -70,24 +55,12 @@ class NeptuneEntityEdgeOperations(EntityEdgeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        prepared: list[dict[str, Any]] = []
-        for edge in edges:
-            edge_data: dict[str, Any] = {
-                'uuid': edge.uuid,
-                'source_node_uuid': edge.source_node_uuid,
-                'target_node_uuid': edge.target_node_uuid,
-                'name': edge.name,
-                'fact': edge.fact,
-                'fact_embedding': edge.fact_embedding,
-                'group_id': edge.group_id,
-                'episodes': edge.episodes,
-                'created_at': edge.created_at,
-                'expired_at': edge.expired_at,
-                'valid_at': edge.valid_at,
-                'invalid_at': edge.invalid_at,
-            }
-            edge_data.update(edge.attributes or {})
-            prepared.append(edge_data)
+        # Imported here: the maintenance package imports the drivers.
+        from graphiti_core.utils.maintenance.edge_operations import reconcile_edge_copies
+
+        # Archolith fork: copies of one edge in a batch get one merged state (menhir#262).
+        reconcile_edge_copies(edges, [])
+        prepared = [entity_edge_save_row(edge) for edge in edges]
 
         query = get_entity_edge_save_bulk_query(GraphProvider.NEPTUNE)
         if tx is not None:
