@@ -1,5 +1,18 @@
 # Changelog — graphiti
 
+## 2026-11-22 — Release prep for `v0.31.2.post4`
+
+- `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed
+  wheel version check), `README.md` (install line and release source), `CHANGELOG.md`: bump the published
+  version to `0.31.2.post4`, which carries #28, #29 and #30 (entity-edge save fixes, menhir#251, #256,
+  #259-#262, review F8) from `menhir/main`. Tag `v0.31.2.post4` on the merged release-prep commit
+  triggers the PyPI release.
+- `.github/workflows/menhir-compatibility.yml`: the offline tests from #28-#30
+  (`test_entity_edge_save_rows`, `test_entity_edge_saved_expiry`, `test_entity_edge_save_after_delete`,
+  `test_add_triplet_self_candidate`, `test_preserved_edge_attributes_validation`) join the fork-contracts
+  pytest step; their files, the live `_int` tests and the edited driver ops join ruff, and the driver ops
+  and `record_parsers.py` join pyright.
+
 ## 2026-11-22 — add_triplet update wins over its own stored copy chosen as duplicate
 
 - `utils/maintenance/edge_operations.py`: `_apply_update_to_own_copy`, called where dedupe picks
