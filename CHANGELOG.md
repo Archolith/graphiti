@@ -5,6 +5,30 @@ This file covers the Archolith maintenance fork published as
 The package still imports as `graphiti_core`. For the upstream project's release
 history, see [getzep/graphiti](https://github.com/getzep/graphiti/releases).
 
+## 0.31.2.post4 — 2026-11-22
+
+[Source tag](https://github.com/Archolith/graphiti/tree/v0.31.2.post4) ·
+[PyPI files](https://pypi.org/project/archolith-graphiti-core/0.31.2.post4/)
+
+### Fixed
+
+Entity-edge saves (Archolith/menhir#251, #256, #259-#262). Label: `upstream bug fix` unless noted.
+
+- One save row for every path (`entity_edge_save_row`): every core field, including
+  `reference_time`, is written, and an attribute never replaces a core field (#260).
+- Copies of one edge in a save batch are reconciled before the rows are built, so the stored
+  result no longer depends on row order (#262).
+- The Neo4j save returns the expiry it kept, and the caller's edge objects get it, so an edge
+  stored expired is not reported live (#259).
+- On Neo4j, a stale save of an edge loaded from the store no longer recreates an edge another
+  writer deleted; the skip is logged at INFO (#261). The mark is bound to the uuid the edge was
+  loaded under, so an edge given a new uuid is saved as a new edge.
+- `add_triplet` updating an edge by its uuid: the edge's own stored copy is never an
+  invalidation candidate (#251), and when dedupe picks that copy as the duplicate, the update's
+  fact, name, attributes and validity window win over the stored ones.
+- `Graphiti.preserved_edge_attributes` validates on assignment: a mapping, a core edge field name
+  or a name with surrounding whitespace is rejected (#256). Label: `Menhir policy divergence`.
+
 ## 0.31.2.post3 — 2026-11-11
 
 [Source tag](https://github.com/Archolith/graphiti/tree/v0.31.2.post3) ·
