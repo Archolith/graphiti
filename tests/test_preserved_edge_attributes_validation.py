@@ -23,6 +23,13 @@ def test_core_edge_fields_are_rejected(value) -> None:
         _graphiti().preserved_edge_attributes = value
 
 
+@pytest.mark.parametrize('value', [[' uuid'], ['fact '], ['time_expiry	']])
+def test_names_with_surrounding_whitespace_are_rejected(value) -> None:
+    # ' uuid' would otherwise slip past the core-field check.
+    with pytest.raises(TypeError, match='whitespace'):
+        _graphiti().preserved_edge_attributes = value
+
+
 def test_assignment_after_construction_is_validated_and_normalized() -> None:
     graphiti = _graphiti()
     with pytest.raises(TypeError):

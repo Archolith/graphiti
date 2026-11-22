@@ -129,6 +129,20 @@ SAVES = pytest.mark.parametrize(
 )
 
 
+@SAVES
+async def test_loaded_edge_given_new_uuid_is_written(driver, group, save) -> None:
+    # add_triplet's endpoint-mismatch branch gives a loaded edge uuid4(); it must be created.
+    _, _, _, loaded = await _saved_loaded(driver, group)
+    loaded.uuid = 'edge-' + uuid4().hex
+    await save(loaded, driver)
+    assert await _count(driver, loaded.uuid) == 1
+    copy = (await _saved_loaded(driver, group))[3].model_copy(
+        update={'uuid': 'edge-' + uuid4().hex}
+    )
+    await save(copy, driver)
+    assert await _count(driver, copy.uuid) == 1
+
+
 async def _saved_loaded(
     driver, group: str
 ) -> tuple[EntityNode, EntityNode, EntityEdge, EntityEdge]:

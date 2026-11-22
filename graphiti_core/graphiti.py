@@ -237,9 +237,10 @@ def _preserved_edge_attribute_names(value: Iterable[str] | None) -> frozenset[st
         raise TypeError('preserved_edge_attributes must be an iterable of names, not a mapping')
     names = list(value)
     for name in names:
-        if not isinstance(name, str) or not name.strip():
+        if not isinstance(name, str) or not name.strip() or name != name.strip():
             raise TypeError(
-                'preserved_edge_attributes entries must be non-blank str, '
+                'preserved_edge_attributes entries must be non-blank str without '
+                'surrounding whitespace, '
                 f'got {type(name).__name__} {name!r}'
             )
     # Core fields are always written from the edge itself, so naming one preserves nothing.

@@ -314,7 +314,7 @@ bulk episodes do not share one candidate object (the drivers here build fresh ob
 search); a shared object could have its mark cleared by another episode's reset.
 A uuid group whose edges differ in group, endpoints
 or fact is not copies of one edge; it is logged and left alone. The save layer also
-reconciles: `add_nodes_and_edges_bulk_tx` and the driver ops `save_bulk` run
+reconciles: `add_nodes_and_edges_bulk_tx` and the Neo4j, FalkorDB and Neptune driver ops `save_bulk` run
 `reconcile_edge_copies(edges, [])` before building rows (a no-op for reconciled callers), so
 a caller that skips reconciliation cannot leave the stored end to row order (menhir#262).
 `add_triplet` never offers an edge's own stored copy as an invalidation candidate for its
@@ -364,20 +364,26 @@ Neo4j driver ops and `add_nodes_and_edges_bulk_tx`, Neo4j only. A custom
 upstream save (menhir#258: Menhir runs Neo4j only).
 
 A stale save never recreates a deleted edge (Neo4j only, menhir#261): an `EntityEdge` built from
-a stored record carries the in-memory, never-saved `_loaded_from_store` mark (both record
-builders set it; `model_copy` keeps it; rebuilding from `model_dump()` drops it and saves as a
-new edge). Its save uses the `stored=True` variant of the save queries: after the endpoints
+a stored record carries the in-memory, never-saved `_loaded_uuid` mark (both record
+builders set it; `model_copy` keeps it). `_loaded_from_store` holds only while `_loaded_uuid`
+equals `uuid`: an edge given a new uuid (`add_triplet`'s endpoint-mismatch branch,
+`model_copy(update={'uuid': ...})`) or rebuilt from `model_dump()` saves as a new edge. Its save uses the `stored=True` variant of the save queries: after the endpoints
 match, it collects every stored relationship with the uuid; with none left another writer
 deleted the edge and the row is skipped (logged at INFO by `report_deleted_edges_not_saved`);
 otherwise it locks those copies, saves as above, and unlocks them. The bulk callers split each
 batch with `save_entity_edge_rows_neo4j` (a uuid counts as loaded when any copy is). A delete
-that commits after the copies were read and before they were locked fails the save's
-transaction instead of recreating the edge (accepted trade-off). New edges keep the upstream
+that commits after the copies were read and before they were locked raises a transient error
+in the save; the driver retries the transaction function, and the retry skips the deleted edge
+instead of recreating it. Accepted limits: the copy check matches the uuid anywhere, not only
+between the row's endpoints, so a stale save of an edge another writer moved to new endpoints
+(same uuid) recreates it at the old ones; a skipped edge is still listed in the
+`AddEpisodeResults`/`AddTripletResults` and `episode.entity_edges` of that call. New edges keep the upstream
 `MERGE`. Tests:
 `tests/test_entity_edge_save_keeps_expiry.py` (query shape),
 `tests/test_entity_edge_save_keeps_expiry_int.py` (live Neo4j, including the concurrent case;
 needs `GRAPHITI_SAVE_TEST_NEO4J_URI`), `tests/test_entity_edge_saved_expiry.py` and
-`tests/test_entity_edge_saved_expiry_int.py`.
+`tests/test_entity_edge_saved_expiry_int.py`; for the deleted-edge guard
+`tests/test_entity_edge_save_after_delete.py` and `tests/test_entity_edge_save_after_delete_int.py`.
 
 One save row for every path: `entity_edge_save_row` (`edges.py`) builds the full-replace row for
 `EntityEdge.save`, `add_nodes_and_edges_bulk_tx` and the Neo4j, FalkorDB and Neptune driver ops:

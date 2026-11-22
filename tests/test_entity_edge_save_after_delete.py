@@ -161,6 +161,26 @@ def test_model_copy_keeps_mark_and_model_dump_rebuild_loses_it() -> None:
     assert EntityEdge(**loaded.model_dump())._loaded_from_store is False
 
 
+def test_new_uuid_drops_mark() -> None:
+    # A loaded edge given a new uuid is a new edge: its save must not skip the row (add_triplet's
+    # endpoint-mismatch branch assigns uuid4()).
+    loaded = entity_edge_from_record(_record())
+    assert loaded.model_copy(update={'uuid': 'other'})._loaded_from_store is False
+    loaded.uuid = 'other'
+    assert loaded._loaded_from_store is False
+    loaded.uuid = 'e1'
+    assert loaded._loaded_from_store is True
+
+
+async def test_bulk_split_sends_reassigned_uuid_to_plain_query() -> None:
+    loaded = entity_edge_from_record(_record())
+    loaded.uuid = 'fresh'
+    run = AsyncMock(return_value=None)
+    await save_entity_edge_rows_neo4j(run, [loaded], [entity_edge_save_row(loaded)])
+    assert run.await_count == 1
+    assert run.await_args.args[0] == get_entity_edge_save_bulk_query(GraphProvider.NEO4J)
+
+
 # ---------------------------------------------- save_entity_edge_rows_neo4j split
 
 

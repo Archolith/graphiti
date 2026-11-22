@@ -18,7 +18,10 @@
 - menhir#261: `EntityEdge._loaded_from_store` (set by both record builders); `stored=True`
   variants of the Neo4j save queries skip an edge another writer deleted instead of recreating
   it; `save_entity_edge_rows_neo4j` splits bulk batches; `report_deleted_edges_not_saved` logs
-  each skip.
+  each skip. The mark is bound to the uuid it was loaded under (`_loaded_uuid`), so an edge
+  given a new uuid (`add_triplet`'s endpoint-mismatch branch) saves as a new edge (PR #28
+  review F1).
+- `preserved_edge_attributes` also rejects names with surrounding whitespace (review F10).
 - `architecture.md`: copies, stale-save, deleted-edge and preserved-attribute sections updated.
 
 ## 2026-11-10 — Publish fence hook and caller-supplied episode uuid (Menhir policy divergence)

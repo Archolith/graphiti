@@ -297,10 +297,19 @@ class EntityEdge(Edge):
     # over a copy that kept its fetched ones. model_copy/deepcopy carry it; the reset in
     # resolve_extracted_edges clears it before each resolution.
     _attributes_resolved: bool = PrivateAttr(default=False)
-    # In-memory only, never saved: this object was built from a stored record. The Neo4j save
-    # then never recreates the edge if another writer deleted it meanwhile (menhir#261). An
-    # object rebuilt from model_dump() loses the mark and saves as a new edge (upstream MERGE).
-    _loaded_from_store: bool = PrivateAttr(default=False)
+    # In-memory only, never saved: the uuid this object was loaded from the store under. While
+    # it still matches ``uuid`` the Neo4j save never recreates the edge if another writer
+    # deleted it meanwhile (menhir#261). A new uuid saves as a new edge (upstream MERGE), as
+    # does an object rebuilt from model_dump().
+    _loaded_uuid: str | None = PrivateAttr(default=None)
+
+    @property
+    def _loaded_from_store(self) -> bool:
+        return self._loaded_uuid is not None and self._loaded_uuid == self.uuid
+
+    @_loaded_from_store.setter
+    def _loaded_from_store(self, value: bool) -> None:
+        self._loaded_uuid = self.uuid if value else None
 
     @model_validator(mode='before')
     @classmethod
@@ -1090,7 +1099,11 @@ def report_deleted_edges_not_saved(edges: Iterable[EntityEdge], records: list[An
         except (KeyError, TypeError, IndexError):
             return
     for uuid in sorted({edge.uuid for edge in edges if edge._loaded_from_store} - saved):
-        logger.info('Edge %s was deleted by another writer; the stale save skipped it', uuid)
+        logger.info(
+            'Edge %s was not saved: no stored copy with its uuid is left '
+            '(deleted by another writer, or an endpoint node is missing)',
+            uuid,
+        )
 
 
 async def save_entity_edge_rows_neo4j(
