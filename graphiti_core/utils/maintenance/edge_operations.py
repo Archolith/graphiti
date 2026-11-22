@@ -832,18 +832,21 @@ def _apply_update_to_own_copy(resolved_edge: EntityEdge, update: EntityEdge) -> 
     """Archolith fork: an update by uuid wins over its own stored copy chosen as its duplicate.
 
     add_triplet with an existing uuid: dedupe may resolve the update to that edge's stored copy,
-    which kept the stored fact and dropped the update. The update's fact, name and attributes win;
-    its dates win when set. The stored copy keeps created_at, expiry and the merged episodes.
+    which kept the stored fact and dropped the update. The update's fact, name and attributes win.
+    The validity window is one value: an update that sets either end replaces both (as on the
+    non-duplicate path), else the stored window stays; mixing them could end it before it starts.
+    The stored copy keeps created_at, expiry and the merged episodes.
     """
     if resolved_edge is update or resolved_edge.uuid != update.uuid:
         return
     resolved_edge.fact = update.fact
     resolved_edge.name = update.name
     resolved_edge.fact_embedding = update.fact_embedding
-    for field in ('valid_at', 'invalid_at', 'reference_time'):
-        value = getattr(update, field)
-        if value is not None:
-            setattr(resolved_edge, field, value)
+    if update.valid_at is not None or update.invalid_at is not None:
+        resolved_edge.valid_at = update.valid_at
+        resolved_edge.invalid_at = update.invalid_at
+    if update.reference_time is not None:
+        resolved_edge.reference_time = update.reference_time
     resolved_edge.attributes = {**(resolved_edge.attributes or {}), **(update.attributes or {})}
 
 

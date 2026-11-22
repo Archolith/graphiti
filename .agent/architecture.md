@@ -324,8 +324,10 @@ an update that resolves to a different edge can still invalidate its own old cop
 `tests/test_add_triplet_self_candidate.py`, live `tests/test_add_triplet_self_candidate_int.py`).
 When dedupe resolves an update by uuid to its own stored copy (an LLM duplicate answer or the
 exact-fact fast path), `_apply_update_to_own_copy` puts the update's fact, name and attributes
-(over the stored ones) on the copy, and its `valid_at`/`invalid_at`/`reference_time` when set;
-the copy keeps `created_at`, its expiry and the merged episodes (review F8). It runs before
+(over the stored ones, preserved keys included: the caller owns them) on the copy. The validity
+window is one value: an update that sets either end replaces both, as on the non-duplicate path,
+else the stored window stays (mixing them could end the window before it starts);
+`reference_time` when set. The copy keeps `created_at`, its expiry and the merged episodes (review F8). It runs before
 contradictions and attributes are resolved.
 
 Caller-preserved edge attributes: a fetched stored edge carries every row property in

@@ -3,8 +3,8 @@
 ## 2026-11-22 — add_triplet update wins over its own stored copy chosen as duplicate
 
 - `utils/maintenance/edge_operations.py`: `_apply_update_to_own_copy`, called where dedupe picks
-  a duplicate, gives the update's fact, name, attributes and set dates to the edge's own stored
-  copy, so an update by uuid is no longer replaced by the stale stored fact (PR #28 review F8).
+  a duplicate, gives the update's fact, name, attributes and validity window (both ends together,
+  when it sets either) to the edge's own stored copy, so an update by uuid is no longer replaced by the stale stored fact (PR #28 review F8).
 - Tests: `test_add_triplet_self_candidate.py` (LLM duplicate and exact-fact paths),
   `test_add_triplet_self_candidate_int.py` (live, duplicate answer).
 

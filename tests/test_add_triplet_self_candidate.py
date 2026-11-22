@@ -349,3 +349,90 @@ async def test_update_wins_when_resolved_to_its_own_stored_copy(mock_embedder, p
     assert edge.attributes == {'source': 'import', 'team': 'blue'}
     assert edge.created_at == created
     assert edge.episodes[0] == 'ep-stored' and 'ep-new' in edge.episodes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'update_window, expected_window',
+    [
+        # A new start with no end replaces the stored window; it never keeps the stored end.
+        ((datetime(2024, 3, 27), None), (datetime(2024, 3, 27), None)),
+        ((None, datetime(2024, 5, 1)), (None, datetime(2024, 5, 1))),
+        # No dates on the update: the stored window stays.
+        ((None, None), (datetime(2024, 1, 1), datetime(2024, 2, 1))),
+    ],
+    ids=['start-only', 'end-only', 'none'],
+)
+async def test_own_copy_duplicate_takes_the_validity_window_as_one_value(
+    mock_embedder, update_window, expected_window
+) -> None:
+    llm = Mock(spec=LLMClient)
+    llm.config = Mock()
+    ce = Mock(spec=CrossEncoderClient)
+    ce.config = Mock()
+    graph_driver = Mock()
+    graph_driver.__class__ = GraphDriver
+    graphiti = Graphiti(
+        graph_driver=graph_driver, llm_client=llm, embedder=mock_embedder, cross_encoder=ce
+    )
+    now = datetime(2024, 1, 1)
+    source = EntityNode(
+        name='Alice', group_id=group_id, labels=['Person'], created_at=now, name_embedding=[0.1]
+    )
+    target = EntityNode(
+        name='Bob', group_id=group_id, labels=['Person'], created_at=now, name_embedding=[0.1]
+    )
+
+    def make_edge(fact: str, valid_at, invalid_at) -> EntityEdge:
+        return EntityEdge(
+            uuid='edge-1',
+            source_node_uuid=source.uuid,
+            target_node_uuid=target.uuid,
+            name='WORKS_WITH',
+            fact=fact,
+            group_id=group_id,
+            created_at=now,
+            valid_at=valid_at,
+            invalid_at=invalid_at,
+            fact_embedding=[0.1],
+            episodes=['ep-0'],
+        )
+
+    stored = make_edge(
+        'Alice works with Bob at Initech', datetime(2024, 1, 1), datetime(2024, 2, 1)
+    )
+    incoming = make_edge('Alice works with Bob at Acme', *update_window)
+    search_mock = AsyncMock(side_effect=[Mock(edges=[stored]), Mock(edges=[])])
+    answer = {'duplicate_facts': [0], 'contradicted_facts': []}
+    saved: dict[str, list[EntityEdge]] = {}
+
+    async def fake_bulk(_driver, _ep, _epe, _nodes, edges, _embedder):
+        saved['edges'] = list(edges)
+
+    with (
+        patch(
+            'graphiti_core.graphiti.EntityNode.get_by_uuid',
+            new=AsyncMock(side_effect=[source, target]),
+        ),
+        patch('graphiti_core.graphiti.EntityEdge.get_by_uuid', new=AsyncMock(return_value=stored)),
+        patch('graphiti_core.graphiti.search', new=search_mock),
+        patch(
+            'graphiti_core.utils.maintenance.edge_operations.generate_prompt_response',
+            new=AsyncMock(return_value=answer),
+        ),
+        patch(
+            'graphiti_core.utils.maintenance.edge_operations._extract_edge_timestamps',
+            new=AsyncMock(),
+        ),
+        patch('graphiti_core.graphiti.create_entity_edge_embeddings', new=AsyncMock()),
+        patch('graphiti_core.graphiti.create_entity_node_embeddings', new=AsyncMock()),
+        patch('graphiti_core.graphiti.add_nodes_and_edges_bulk', new=fake_bulk),
+    ):
+        await graphiti.add_triplet(source, incoming, target)
+
+    (edge,) = saved['edges']
+    assert (edge.valid_at, edge.invalid_at) == expected_window
+    if expected_window[1] is None:
+        # Not expired as a malformed (inverted) window; an edge with its own end is expired
+        # as upstream does.
+        assert edge.expired_at is None
