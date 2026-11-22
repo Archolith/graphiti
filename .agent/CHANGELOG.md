@@ -2,8 +2,8 @@
 
 ## 2026-11-22 — add_triplet update keeps its fact when the stored copy is contradicted
 
-- `utils/maintenance/edge_operations.py`: `_dedupe_extracted_edge` never returns the incoming
-  edge's own stored copy (same uuid) as an invalidation candidate. The same-pair search returns
+- `utils/maintenance/edge_operations.py`: `_dedupe_extracted_edge` never returns the stored copy
+  of the edge being saved (the resolved edge's uuid) as an invalidation candidate. The same-pair search returns
   that copy on an update by uuid; when the LLM marked it contradicted, the save kept the old
   fact and expired the edge (menhir#251, the path PR #28 left open).
 - Tests: `test_add_triplet_self_candidate.py` (real resolution, LLM stubbed),
