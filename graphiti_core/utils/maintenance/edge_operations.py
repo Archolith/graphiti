@@ -828,6 +828,25 @@ def reconcile_edge_copies(
                 edge.attributes = dict(attributes)
 
 
+def _apply_update_to_own_copy(resolved_edge: EntityEdge, update: EntityEdge) -> None:
+    """Archolith fork: an update by uuid wins over its own stored copy chosen as its duplicate.
+
+    add_triplet with an existing uuid: dedupe may resolve the update to that edge's stored copy,
+    which kept the stored fact and dropped the update. The update's fact, name and attributes win;
+    its dates win when set. The stored copy keeps created_at, expiry and the merged episodes.
+    """
+    if resolved_edge is update or resolved_edge.uuid != update.uuid:
+        return
+    resolved_edge.fact = update.fact
+    resolved_edge.name = update.name
+    resolved_edge.fact_embedding = update.fact_embedding
+    for field in ('valid_at', 'invalid_at', 'reference_time'):
+        value = getattr(update, field)
+        if value is not None:
+            setattr(resolved_edge, field, value)
+    resolved_edge.attributes = {**(resolved_edge.attributes or {}), **(update.attributes or {})}
+
+
 def _contradiction_invalidates(edge: EntityEdge, resolved_edge: EntityEdge) -> bool:
     """True when ``resolved_edge`` invalidates ``edge`` (the mutating branch below)."""
     # (Edge invalid before new edge becomes valid) or (new edge invalid before edge becomes valid)
@@ -1158,6 +1177,7 @@ async def _dedupe_extracted_edge(
         for episode_uuid in [*extracted_edge.episodes, episode.uuid]:
             if episode_uuid not in resolved_edge.episodes:
                 resolved_edge.episodes.append(episode_uuid)
+        _apply_update_to_own_copy(resolved_edge, extracted_edge)
 
     # Nothing to compare against, so there is no duplicate and nothing to contradict.
     if len(related_edges) == 0 and len(existing_edges) == 0:

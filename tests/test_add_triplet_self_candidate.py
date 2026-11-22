@@ -263,3 +263,89 @@ async def test_old_copy_is_still_invalidated_when_the_update_resolves_to_another
     old = saved['edges'][1]
     assert old.fact == 'Alice works with Bob at Initech'
     assert old.expired_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('path', ['llm_duplicate', 'exact_fact'])
+async def test_update_wins_when_resolved_to_its_own_stored_copy(mock_embedder, path) -> None:
+    # Review F8: dedupe picks the edge's own stored copy as the duplicate. The update's fact,
+    # dates and attributes win; the stored copy keeps created_at and its episodes.
+    llm = Mock(spec=LLMClient)
+    llm.config = Mock()
+    ce = Mock(spec=CrossEncoderClient)
+    ce.config = Mock()
+    graph_driver = Mock()
+    graph_driver.__class__ = GraphDriver
+    graphiti = Graphiti(
+        graph_driver=graph_driver, llm_client=llm, embedder=mock_embedder, cross_encoder=ce
+    )
+    created = datetime(2024, 1, 1)
+    now = datetime(2024, 3, 1)
+    later = datetime(2024, 4, 1)
+    source = EntityNode(
+        name='Alice', group_id=group_id, labels=['Person'], created_at=now, name_embedding=[0.1]
+    )
+    target = EntityNode(
+        name='Bob', group_id=group_id, labels=['Person'], created_at=now, name_embedding=[0.1]
+    )
+    stored = EntityEdge(
+        uuid='edge-1',
+        source_node_uuid=source.uuid,
+        target_node_uuid=target.uuid,
+        name='WORKS_WITH',
+        fact='Alice works with Bob at Initech',
+        group_id=group_id,
+        created_at=created,
+        valid_at=now,
+        fact_embedding=[0.1],
+        episodes=['ep-stored'],
+        attributes={'source': 'import', 'team': 'red'},
+    )
+    incoming = EntityEdge(
+        uuid='edge-1',
+        source_node_uuid=source.uuid,
+        target_node_uuid=target.uuid,
+        name='WORKS_WITH',
+        fact=stored.fact if path == 'exact_fact' else 'Alice works with Bob at Acme',
+        group_id=group_id,
+        created_at=now,
+        valid_at=later,
+        fact_embedding=[0.2],
+        episodes=['ep-new'],
+        attributes={'team': 'blue'},
+    )
+    search_mock = AsyncMock(side_effect=[Mock(edges=[stored]), Mock(edges=[])])
+    answer = {'duplicate_facts': [0], 'contradicted_facts': []}
+    saved: dict[str, list[EntityEdge]] = {}
+
+    async def fake_bulk(_driver, _ep, _epe, _nodes, edges, _embedder):
+        saved['edges'] = list(edges)
+
+    with (
+        patch(
+            'graphiti_core.graphiti.EntityNode.get_by_uuid',
+            new=AsyncMock(side_effect=[source, target]),
+        ),
+        patch('graphiti_core.graphiti.EntityEdge.get_by_uuid', new=AsyncMock(return_value=stored)),
+        patch('graphiti_core.graphiti.search', new=search_mock),
+        patch(
+            'graphiti_core.utils.maintenance.edge_operations.generate_prompt_response',
+            new=AsyncMock(return_value=answer),
+        ),
+        patch(
+            'graphiti_core.utils.maintenance.edge_operations._extract_edge_timestamps',
+            new=AsyncMock(),
+        ),
+        patch('graphiti_core.graphiti.create_entity_edge_embeddings', new=AsyncMock()),
+        patch('graphiti_core.graphiti.create_entity_node_embeddings', new=AsyncMock()),
+        patch('graphiti_core.graphiti.add_nodes_and_edges_bulk', new=fake_bulk),
+    ):
+        await graphiti.add_triplet(source, incoming, target)
+
+    assert [e.uuid for e in saved['edges']] == ['edge-1']
+    edge = saved['edges'][0]
+    assert edge.fact == incoming.fact
+    assert edge.valid_at == later
+    assert edge.attributes == {'source': 'import', 'team': 'blue'}
+    assert edge.created_at == created
+    assert edge.episodes[0] == 'ep-stored' and 'ep-new' in edge.episodes

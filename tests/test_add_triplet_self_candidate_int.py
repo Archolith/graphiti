@@ -87,8 +87,16 @@ async def _stored(driver, uuid: str) -> list[dict]:
     return [dict(r) for r in records]
 
 
-async def test_update_by_uuid_keeps_new_fact_when_llm_contradicts_stored_copy(
-    graphiti, group
+@pytest.mark.parametrize(
+    'answer',
+    [
+        {'duplicate_facts': [], 'contradicted_facts': [0]},  # menhir#251
+        {'duplicate_facts': [0], 'contradicted_facts': []},  # review F8
+    ],
+    ids=['contradicted', 'duplicate'],
+)
+async def test_update_by_uuid_keeps_new_fact_whatever_llm_says_of_stored_copy(
+    graphiti, group, answer
 ) -> None:
     driver = graphiti.driver
     user = EntityNode(name='User', group_id=group, labels=['Entity'], created_at=EARLY)
@@ -110,7 +118,6 @@ async def test_update_by_uuid_keeps_new_fact_when_llm_contradicts_stored_copy(
         return result
 
     incoming = _edge(user, city, uuid, 'The user lives in Milan.', LATER)
-    answer = {'duplicate_facts': [], 'contradicted_facts': [0]}
     with (
         patch('graphiti_core.graphiti.search', new=recording_search),
         patch(
