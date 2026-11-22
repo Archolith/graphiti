@@ -361,8 +361,19 @@ in-memory edges and logs each restore at INFO, so `AddEpisodeResults`/`AddTriple
 report an edge live that is stored expired (menhir#259). It runs in `EntityEdge.save`, the
 Neo4j driver ops and `add_nodes_and_edges_bulk_tx`, Neo4j only. A custom
 `graph_operations_interface` bypasses these queries. FalkorDB, Neptune and Kuzu keep the
-upstream save (menhir#258: Menhir runs Neo4j only). A stale save of an edge another writer
-deleted still recreates it through `MERGE` (menhir#261, open). Tests:
+upstream save (menhir#258: Menhir runs Neo4j only).
+
+A stale save never recreates a deleted edge (Neo4j only, menhir#261): an `EntityEdge` built from
+a stored record carries the in-memory, never-saved `_loaded_from_store` mark (both record
+builders set it; `model_copy` keeps it; rebuilding from `model_dump()` drops it and saves as a
+new edge). Its save uses the `stored=True` variant of the save queries: after the endpoints
+match, it collects every stored relationship with the uuid; with none left another writer
+deleted the edge and the row is skipped (logged at INFO by `report_deleted_edges_not_saved`);
+otherwise it locks those copies, saves as above, and unlocks them. The bulk callers split each
+batch with `save_entity_edge_rows_neo4j` (a uuid counts as loaded when any copy is). A delete
+that commits after the copies were read and before they were locked fails the save's
+transaction instead of recreating the edge (accepted trade-off). New edges keep the upstream
+`MERGE`. Tests:
 `tests/test_entity_edge_save_keeps_expiry.py` (query shape),
 `tests/test_entity_edge_save_keeps_expiry_int.py` (live Neo4j, including the concurrent case;
 needs `GRAPHITI_SAVE_TEST_NEO4J_URI`), `tests/test_entity_edge_saved_expiry.py` and

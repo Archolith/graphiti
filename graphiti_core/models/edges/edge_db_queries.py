@@ -81,7 +81,26 @@ _NEO4J_KEEP_STORED_EXPIRY = """
 """
 
 
-def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) -> str:
+# Archolith fork (menhir#261): the save of an edge loaded from the store. After the endpoints
+# match, every stored copy of its uuid is locked; when none is left, another writer deleted the
+# edge and the row is skipped, so a stale save never recreates it. A delete that commits
+# between reading the copies and locking them fails this transaction instead. The copies are
+# unlocked after the save (a copy that is e already lost the lock to the full replace).
+_NEO4J_LOCK_STORED_COPIES = """
+                WITH source, target{carry}, [()-[stored:RELATES_TO {{uuid: {row}.uuid}}]->() | stored] AS stored_copies
+                WHERE size(stored_copies) > 0
+                FOREACH (stored IN stored_copies | SET stored._graphiti_save_lock = true)
+"""
+_NEO4J_UNLOCK_STORED_COPIES = """
+                FOREACH (stored IN stored_copies | REMOVE stored._graphiti_save_lock)
+"""
+
+
+def get_entity_edge_save_query(
+    provider: GraphProvider, has_aoss: bool = False, stored: bool = False
+) -> str:
+    """Save one entity edge. ``stored`` (Neo4j only): the edge was loaded from the store, so the
+    save skips it when another writer has deleted it (menhir#261)."""
     match provider:
         case GraphProvider.FALKORDB:
             return """
@@ -127,6 +146,23 @@ def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) 
                 if not has_aoss
                 else ''
             )
+            if stored:
+                return (
+                    """
+                        MATCH (source:Entity {uuid: $edge_data.source_uuid})
+                        MATCH (target:Entity {uuid: $edge_data.target_uuid})
+                        """
+                    + _NEO4J_LOCK_STORED_COPIES.format(row='$edge_data', carry='')
+                    + """
+                        MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
+                        """
+                    + _NEO4J_KEEP_STORED_EXPIRY.format(row='$edge_data', carry=', stored_copies')
+                    + _NEO4J_UNLOCK_STORED_COPIES
+                    + save_embedding_query
+                    + """
+                RETURN e.uuid AS uuid, e.expired_at AS expired_at, e.invalid_at AS invalid_at
+                """
+                )
             return (
                 (
                     """
@@ -143,7 +179,11 @@ def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) 
             )
 
 
-def get_entity_edge_save_bulk_query(provider: GraphProvider, has_aoss: bool = False) -> str:
+def get_entity_edge_save_bulk_query(
+    provider: GraphProvider, has_aoss: bool = False, stored: bool = False
+) -> str:
+    """Save a batch of entity edges. ``stored`` (Neo4j only): every row is an edge loaded from
+    the store, skipped when another writer has deleted it (menhir#261)."""
     match provider:
         case GraphProvider.FALKORDB:
             return """
@@ -192,6 +232,24 @@ def get_entity_edge_save_bulk_query(provider: GraphProvider, has_aoss: bool = Fa
                 if not has_aoss
                 else ''
             )
+            if stored:
+                return (
+                    """
+                    UNWIND $entity_edges AS edge
+                    MATCH (source:Entity {uuid: edge.source_node_uuid})
+                    MATCH (target:Entity {uuid: edge.target_node_uuid})
+                    """
+                    + _NEO4J_LOCK_STORED_COPIES.format(row='edge', carry=', edge')
+                    + """
+                    MERGE (source)-[e:RELATES_TO {uuid: edge.uuid}]->(target)
+                    """
+                    + _NEO4J_KEEP_STORED_EXPIRY.format(row='edge', carry=', edge, stored_copies')
+                    + _NEO4J_UNLOCK_STORED_COPIES
+                    + save_embedding_query
+                    + """
+                RETURN edge.uuid AS uuid, e.expired_at AS expired_at, e.invalid_at AS invalid_at
+            """
+                )
             return (
                 """
                     UNWIND $entity_edges AS edge

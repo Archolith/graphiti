@@ -18,7 +18,7 @@ import inspect
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from time import time
 from typing import Any
@@ -41,6 +41,7 @@ from graphiti_core.models.edges.edge_db_queries import (
     NEXT_EPISODE_EDGE_SAVE,
     get_community_edge_save_query,
     get_entity_edge_return_query,
+    get_entity_edge_save_bulk_query,
     get_entity_edge_save_query,
 )
 from graphiti_core.nodes import Node
@@ -296,6 +297,10 @@ class EntityEdge(Edge):
     # over a copy that kept its fetched ones. model_copy/deepcopy carry it; the reset in
     # resolve_extracted_edges clears it before each resolution.
     _attributes_resolved: bool = PrivateAttr(default=False)
+    # In-memory only, never saved: this object was built from a stored record. The Neo4j save
+    # then never recreates the edge if another writer deleted it meanwhile (menhir#261). An
+    # object rebuilt from model_dump() loses the mark and saves as a new edge (upstream MERGE).
+    _loaded_from_store: bool = PrivateAttr(default=False)
 
     @model_validator(mode='before')
     @classmethod
@@ -386,11 +391,13 @@ class EntityEdge(Edge):
                 self, source_key='source_uuid', target_key='target_uuid'
             )
             result = await driver.execute_query(
-                get_entity_edge_save_query(driver.provider),
+                get_entity_edge_save_query(driver.provider, stored=self._loaded_from_store),
                 edge_data=edge_data,
             )
             if driver.provider == GraphProvider.NEO4J:
-                apply_saved_expiry([self], await entity_edge_save_records(result))
+                records = await entity_edge_save_records(result)
+                report_deleted_edges_not_saved([self], records)
+                apply_saved_expiry([self], records)
 
         logger.debug(f'Saved edge to Graph: {self.uuid}')
 
@@ -1074,6 +1081,41 @@ def apply_saved_expiry(edges: Iterable[EntityEdge], records: Iterable[Any]) -> N
         edge.invalid_at = invalid_at
 
 
+def report_deleted_edges_not_saved(edges: Iterable[EntityEdge], records: list[Any]) -> None:
+    """Log each edge loaded from the store that the Neo4j save skipped as deleted (menhir#261)."""
+    saved: set[str] = set()
+    for record in records:
+        try:
+            saved.add(record['uuid'])
+        except (KeyError, TypeError, IndexError):
+            return
+    for uuid in sorted({edge.uuid for edge in edges if edge._loaded_from_store} - saved):
+        logger.info('Edge %s was deleted by another writer; the stale save skipped it', uuid)
+
+
+async def save_entity_edge_rows_neo4j(
+    run: Callable[..., Awaitable[Any]], edges: list[EntityEdge], rows: list[dict[str, Any]]
+) -> None:
+    """Run the Neo4j bulk save for ``rows`` (built from ``edges``) and report what it stored.
+
+    Rows of edges loaded from the store use the save that skips an edge another writer deleted
+    (menhir#261); the other rows use the plain save. A uuid counts as loaded when any copy of it
+    was. ``run`` is ``tx.run`` or ``execute_query``.
+    """
+    loaded = {edge.uuid for edge in edges if edge._loaded_from_store}
+    records: list[Any] = []
+    for stored in (False, True):
+        batch = [row for row in rows if (row['uuid'] in loaded) is stored]
+        if batch:
+            result = await run(
+                get_entity_edge_save_bulk_query(GraphProvider.NEO4J, stored=stored),
+                entity_edges=batch,
+            )
+            records.extend(await entity_edge_save_records(result))
+    report_deleted_edges_not_saved(edges, records)
+    apply_saved_expiry(edges, records)
+
+
 def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityEdge:
     episodes = record['episodes']
     if provider == GraphProvider.KUZU:
@@ -1110,6 +1152,7 @@ def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityE
         reference_time=parse_db_date(record.get('reference_time')),
         attributes=attributes,
     )
+    edge._loaded_from_store = True
 
     return edge
 

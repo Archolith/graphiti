@@ -15,7 +15,11 @@
 - `graphiti.py`: `add_triplet` never offers an edge's own stored copy as an invalidation
   candidate (menhir#251); `preserved_edge_attributes` is a validated property that rejects
   mappings and core field names (menhir#256).
-- `architecture.md`: copies, stale-save and preserved-attribute sections updated.
+- menhir#261: `EntityEdge._loaded_from_store` (set by both record builders); `stored=True`
+  variants of the Neo4j save queries skip an edge another writer deleted instead of recreating
+  it; `save_entity_edge_rows_neo4j` splits bulk batches; `report_deleted_edges_not_saved` logs
+  each skip.
+- `architecture.md`: copies, stale-save, deleted-edge and preserved-attribute sections updated.
 
 ## 2026-11-10 — Publish fence hook and caller-supplied episode uuid (Menhir policy divergence)
 
