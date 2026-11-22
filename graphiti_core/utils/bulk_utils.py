@@ -36,7 +36,9 @@ from graphiti_core.edges import (
     Edge,
     EntityEdge,
     EpisodicEdge,
+    apply_saved_expiry,
     create_entity_edge_embeddings,
+    entity_edge_save_records,
     entity_edge_save_row,
 )
 from graphiti_core.embedder import EmbedderClient
@@ -276,10 +278,13 @@ async def add_nodes_and_edges_bulk_tx(
             get_episodic_edge_save_bulk_query(driver.provider),
             episodic_edges=[edge.model_dump() for edge in episodic_edges],
         )
-        await tx.run(
+        edge_save_result = await tx.run(
             get_entity_edge_save_bulk_query(driver.provider),
             entity_edges=edges,
         )
+        if driver.provider == GraphProvider.NEO4J:
+            # Archolith fork (menhir#259): report the expiry the save kept, not the stale one.
+            apply_saved_expiry(entity_edges, await entity_edge_save_records(edge_save_result))
 
     if publish_fence is not None and fence_uuid is not None:
         await publish_fence.after_write(

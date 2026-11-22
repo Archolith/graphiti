@@ -20,7 +20,12 @@ from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.entity_edge_ops import EntityEdgeOperations
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
 from graphiti_core.driver.record_parsers import entity_edge_from_record
-from graphiti_core.edges import EntityEdge, entity_edge_save_row
+from graphiti_core.edges import (
+    EntityEdge,
+    apply_saved_expiry,
+    entity_edge_save_records,
+    entity_edge_save_row,
+)
 from graphiti_core.errors import EdgeNotFoundError
 from graphiti_core.models.edges.edge_db_queries import (
     get_entity_edge_return_query,
@@ -42,9 +47,11 @@ class Neo4jEntityEdgeOperations(EntityEdgeOperations):
 
         query = get_entity_edge_save_query(GraphProvider.NEO4J)
         if tx is not None:
-            await tx.run(query, edge_data=edge_data)
+            result = await tx.run(query, edge_data=edge_data)
         else:
-            await executor.execute_query(query, edge_data=edge_data)
+            result = await executor.execute_query(query, edge_data=edge_data)
+        # Archolith fork (menhir#259): report the expiry the save kept, not the stale one.
+        apply_saved_expiry([edge], await entity_edge_save_records(result))
 
         logger.debug(f'Saved Edge to Graph: {edge.uuid}')
 
@@ -64,9 +71,11 @@ class Neo4jEntityEdgeOperations(EntityEdgeOperations):
 
         query = get_entity_edge_save_bulk_query(GraphProvider.NEO4J)
         if tx is not None:
-            await tx.run(query, entity_edges=prepared)
+            result = await tx.run(query, entity_edges=prepared)
         else:
-            await executor.execute_query(query, entity_edges=prepared)
+            result = await executor.execute_query(query, entity_edges=prepared)
+        # Archolith fork (menhir#259): report the expiry the save kept, not the stale one.
+        apply_saved_expiry(edges, await entity_edge_save_records(result))
 
     async def delete(
         self,

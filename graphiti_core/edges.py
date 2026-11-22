@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import inspect
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from datetime import datetime
 from time import time
 from typing import Any
@@ -42,6 +44,7 @@ from graphiti_core.models.edges.edge_db_queries import (
     get_entity_edge_save_query,
 )
 from graphiti_core.nodes import Node
+from graphiti_core.utils.datetime_utils import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +389,8 @@ class EntityEdge(Edge):
                 get_entity_edge_save_query(driver.provider),
                 edge_data=edge_data,
             )
+            if driver.provider == GraphProvider.NEO4J:
+                apply_saved_expiry([self], await entity_edge_save_records(result))
 
         logger.debug(f'Saved edge to Graph: {self.uuid}')
 
@@ -1015,6 +1020,58 @@ def entity_edge_save_row(
             if key not in row:
                 row[key] = value
     return row
+
+
+async def entity_edge_save_records(result: Any) -> list[Any]:
+    """Records from a save's result: an EagerResult, an (records, ...) tuple or a Neo4j result."""
+    records = getattr(result, 'records', None)
+    if isinstance(records, list):
+        return records
+    if isinstance(result, tuple) and result and isinstance(result[0], list):
+        return result[0]
+    data = getattr(result, 'data', None)
+    if data is not None and inspect.iscoroutinefunction(data):
+        rows = await data()
+        return rows if isinstance(rows, list) else []
+    return []
+
+
+def apply_saved_expiry(edges: Iterable[EntityEdge], records: Iterable[Any]) -> None:
+    """Give in-memory edges the expiry the Neo4j save stored, logging each restore.
+
+    Archolith fork (menhir#259): the Neo4j save keeps an earlier stored expiry over a stale
+    incoming one. Without this the caller's edges, and the AddEpisodeResults built from them,
+    would report an edge live that is stored expired. Records lacking the effective values
+    (other providers) change nothing. For copies of one edge the last row is the stored state.
+    """
+    stored: dict[str, tuple[datetime | None, datetime | None]] = {}
+    for record in records:
+        try:
+            stored[record['uuid']] = (
+                parse_db_date(record['expired_at']),
+                parse_db_date(record['invalid_at']),
+            )
+        except (KeyError, TypeError, IndexError):
+            return
+    for edge in edges:
+        if edge.uuid not in stored:
+            continue
+        expired_at, invalid_at = stored[edge.uuid]
+        if ensure_utc(edge.expired_at) == ensure_utc(expired_at) and ensure_utc(
+            edge.invalid_at
+        ) == ensure_utc(invalid_at):
+            continue
+        logger.info(
+            'Edge %s keeps its stored expiry over a stale save: '
+            'expired_at %s -> %s, invalid_at %s -> %s',
+            edge.uuid,
+            edge.expired_at,
+            expired_at,
+            edge.invalid_at,
+            invalid_at,
+        )
+        edge.expired_at = expired_at
+        edge.invalid_at = invalid_at
 
 
 def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityEdge:

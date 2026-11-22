@@ -138,7 +138,7 @@ def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) 
                     + save_embedding_query
                 )
                 + """
-                RETURN e.uuid AS uuid
+                RETURN e.uuid AS uuid, e.expired_at AS expired_at, e.invalid_at AS invalid_at
                 """
             )
 
@@ -202,7 +202,7 @@ def get_entity_edge_save_bulk_query(provider: GraphProvider, has_aoss: bool = Fa
                 + _NEO4J_KEEP_STORED_EXPIRY.format(row='edge', carry=', edge')
                 + save_embedding_query
                 + """
-                RETURN edge.uuid AS uuid
+                RETURN edge.uuid AS uuid, e.expired_at AS expired_at, e.invalid_at AS invalid_at
             """
             )
 
