@@ -313,9 +313,12 @@ override a recomputed copy; with no recomputed copy, attributes are left alone
 bulk episodes do not share one candidate object (the drivers here build fresh objects per
 search); a shared object could have its mark cleared by another episode's reset.
 A uuid group whose edges differ in group, endpoints
-or fact is not copies of one edge; it is logged and left alone. `add_triplet` is not
-reconciled: an update by an existing uuid can meet its own stored copy among the
-invalidation candidates (upstream behavior, not changed here).
+or fact is not copies of one edge; it is logged and left alone. The save layer also
+reconciles: `add_nodes_and_edges_bulk_tx` and the Neo4j, FalkorDB and Neptune driver ops `save_bulk` run
+`reconcile_edge_copies(edges, [])` before building rows (a no-op for reconciled callers), so
+a caller that skips reconciliation cannot leave the stored end to row order (menhir#262).
+`add_triplet` never offers an edge's own stored copy as an invalidation candidate for its
+update (menhir#251).
 
 Caller-preserved edge attributes: a fetched stored edge carries every row property in
 `attributes` (`properties(e) AS attributes`), and `EntityEdge.save` writes `attributes` back as
@@ -335,7 +338,11 @@ hook requires `time_world_end == invalid_at`). The early-return and fast paths a
 Threaded through `resolve_extracted_edges`, `dedupe_edges_bulk` and every `Graphiti` resolver
 call (AST-checked); empty by default, in which case calls keep the legacy shape
 (`tests/test_preserved_edge_attributes.py`). Constructor validation runs before any driver is
-created.
+created. `preserved_edge_attributes` is a property: a later assignment is validated the same way,
+a mapping is rejected, and core edge field names are rejected because the save always writes
+them from the edge (menhir#256, `tests/test_preserved_edge_attributes_validation.py`). A key a
+host writes on an edge outside Graphiti and does not list here is dropped when a later
+duplicate resolution recomputes or clears the attributes (menhir#257).
 
 Stored expiry survives a stale save (Neo4j only): the entity-edge save is a full replace of the
 copy a writer fetched, so a writer that fetched an edge before another writer expired it used to
@@ -347,15 +354,43 @@ expired, every save keeps the earliest `expired_at` and the earliest non-null `i
 cannot move a truncated end later. Taking the lock before the read makes the read see a
 concurrent expiry that committed while the save waited (read committed). Graphiti never clears
 `expired_at` on purpose, so no caller loses an un-expire; `add_triplet` reusing an expired
-edge's uuid keeps it expired. A save over a live stored edge is written as given. In one bulk
-batch every row reads the pre-batch stored values, so unreconciled copies of an expired edge
-keep it expired but the surviving `invalid_at` depends on row order (Graphiti reconciles copies
-before a bulk save). The restore is silent (the queries return only the uuid). A custom
+edge's uuid keeps it expired. A save over a live stored edge is written as given. Copies of
+one edge in a batch are reconciled before the rows are built (above). The queries return the
+stored `expired_at`/`invalid_at`; `apply_saved_expiry` (`edges.py`) copies them onto the
+in-memory edges and logs each restore at INFO, so `AddEpisodeResults`/`AddTripletResults` never
+report an edge live that is stored expired (menhir#259). It runs in `EntityEdge.save`, the
+Neo4j driver ops and `add_nodes_and_edges_bulk_tx`, Neo4j only. A custom
 `graph_operations_interface` bypasses these queries. FalkorDB, Neptune and Kuzu keep the
-upstream save. Tests:
-`tests/test_entity_edge_save_keeps_expiry.py` (query shape) and
+upstream save (menhir#258: Menhir runs Neo4j only).
+
+A stale save never recreates a deleted edge (Neo4j only, menhir#261): an `EntityEdge` built from
+a stored record carries the in-memory, never-saved `_loaded_uuid` mark (both record
+builders set it; `model_copy` keeps it). `_loaded_from_store` holds only while `_loaded_uuid`
+equals `uuid`: an edge given a new uuid (`add_triplet`'s endpoint-mismatch branch,
+`model_copy(update={'uuid': ...})`) or rebuilt from `model_dump()` saves as a new edge. Its save uses the `stored=True` variant of the save queries: after the endpoints
+match, it collects every stored relationship with the uuid; with none left another writer
+deleted the edge and the row is skipped (logged at INFO by `report_deleted_edges_not_saved`);
+otherwise it locks those copies, saves as above, and unlocks them. The bulk callers split each
+batch with `save_entity_edge_rows_neo4j` (a uuid counts as loaded when any copy is). A delete
+that commits after the copies were read and before they were locked raises a transient error
+in the save; the driver retries the transaction function, and the retry skips the deleted edge
+instead of recreating it. Accepted limits: the copy check matches the uuid anywhere, not only
+between the row's endpoints, so a stale save of an edge another writer moved to new endpoints
+(same uuid) recreates it at the old ones; a skipped edge is still listed in the
+`AddEpisodeResults`/`AddTripletResults` and `episode.entity_edges` of that call. New edges keep the upstream
+`MERGE`. Tests:
+`tests/test_entity_edge_save_keeps_expiry.py` (query shape),
 `tests/test_entity_edge_save_keeps_expiry_int.py` (live Neo4j, including the concurrent case;
-needs `GRAPHITI_SAVE_TEST_NEO4J_URI`).
+needs `GRAPHITI_SAVE_TEST_NEO4J_URI`), `tests/test_entity_edge_saved_expiry.py` and
+`tests/test_entity_edge_saved_expiry_int.py`; for the deleted-edge guard
+`tests/test_entity_edge_save_after_delete.py` and `tests/test_entity_edge_save_after_delete_int.py`.
+
+One save row for every path: `entity_edge_save_row` (`edges.py`) builds the full-replace row for
+`EntityEdge.save`, `add_nodes_and_edges_bulk_tx` and the Neo4j, FalkorDB and Neptune driver ops:
+every core field including `reference_time`, then attributes that do not shadow a core field
+(an attribute can hold a stale string copy of a typed field). Upstream driver ops omitted
+`reference_time` and let attributes overwrite core fields; Kuzu ops now pass `reference_time`
+(menhir#260). Tests: `tests/test_entity_edge_save_rows.py`, `tests/test_entity_edge_save_rows_int.py`.
 
 ## Edge-Invalidation Hook: Host Veto on Expiring an Edge (native, fork)
 

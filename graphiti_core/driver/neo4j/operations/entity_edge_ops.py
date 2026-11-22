@@ -15,17 +15,22 @@ limitations under the License.
 """
 
 import logging
-from typing import Any
 
 from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.entity_edge_ops import EntityEdgeOperations
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
 from graphiti_core.driver.record_parsers import entity_edge_from_record
-from graphiti_core.edges import EntityEdge
+from graphiti_core.edges import (
+    EntityEdge,
+    apply_saved_expiry,
+    entity_edge_save_records,
+    entity_edge_save_row,
+    report_deleted_edges_not_saved,
+    save_entity_edge_rows_neo4j,
+)
 from graphiti_core.errors import EdgeNotFoundError
 from graphiti_core.models.edges.edge_db_queries import (
     get_entity_edge_return_query,
-    get_entity_edge_save_bulk_query,
     get_entity_edge_save_query,
 )
 
@@ -39,27 +44,18 @@ class Neo4jEntityEdgeOperations(EntityEdgeOperations):
         edge: EntityEdge,
         tx: Transaction | None = None,
     ) -> None:
-        edge_data: dict[str, Any] = {
-            'uuid': edge.uuid,
-            'source_uuid': edge.source_node_uuid,
-            'target_uuid': edge.target_node_uuid,
-            'name': edge.name,
-            'fact': edge.fact,
-            'fact_embedding': edge.fact_embedding,
-            'group_id': edge.group_id,
-            'episodes': edge.episodes,
-            'created_at': edge.created_at,
-            'expired_at': edge.expired_at,
-            'valid_at': edge.valid_at,
-            'invalid_at': edge.invalid_at,
-        }
-        edge_data.update(edge.attributes or {})
+        edge_data = entity_edge_save_row(edge, source_key='source_uuid', target_key='target_uuid')
 
-        query = get_entity_edge_save_query(GraphProvider.NEO4J)
+        # Archolith fork (menhir#261): an edge loaded from the store is never recreated.
+        query = get_entity_edge_save_query(GraphProvider.NEO4J, stored=edge._loaded_from_store)
         if tx is not None:
-            await tx.run(query, edge_data=edge_data)
+            result = await tx.run(query, edge_data=edge_data)
         else:
-            await executor.execute_query(query, edge_data=edge_data)
+            result = await executor.execute_query(query, edge_data=edge_data)
+        # Archolith fork (menhir#259): report the expiry the save kept, not the stale one.
+        records = await entity_edge_save_records(result)
+        report_deleted_edges_not_saved([edge], records)
+        apply_saved_expiry([edge], records)
 
         logger.debug(f'Saved Edge to Graph: {edge.uuid}')
 
@@ -70,30 +66,17 @@ class Neo4jEntityEdgeOperations(EntityEdgeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        prepared: list[dict[str, Any]] = []
-        for edge in edges:
-            edge_data: dict[str, Any] = {
-                'uuid': edge.uuid,
-                'source_node_uuid': edge.source_node_uuid,
-                'target_node_uuid': edge.target_node_uuid,
-                'name': edge.name,
-                'fact': edge.fact,
-                'fact_embedding': edge.fact_embedding,
-                'group_id': edge.group_id,
-                'episodes': edge.episodes,
-                'created_at': edge.created_at,
-                'expired_at': edge.expired_at,
-                'valid_at': edge.valid_at,
-                'invalid_at': edge.invalid_at,
-            }
-            edge_data.update(edge.attributes or {})
-            prepared.append(edge_data)
+        # Imported here: the maintenance package imports the drivers.
+        from graphiti_core.utils.maintenance.edge_operations import reconcile_edge_copies
 
-        query = get_entity_edge_save_bulk_query(GraphProvider.NEO4J)
-        if tx is not None:
-            await tx.run(query, entity_edges=prepared)
-        else:
-            await executor.execute_query(query, entity_edges=prepared)
+        # Archolith fork: copies of one edge in a batch get one merged state (menhir#262).
+        reconcile_edge_copies(edges, [])
+        prepared = [entity_edge_save_row(edge) for edge in edges]
+
+        # Archolith fork (menhir#259, #261): loaded edges are never recreated, and the caller's
+        # edges get the expiry the save kept.
+        run = tx.run if tx is not None else executor.execute_query
+        await save_entity_edge_rows_neo4j(run, edges, prepared)
 
     async def delete(
         self,

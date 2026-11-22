@@ -32,7 +32,14 @@ from graphiti_core.driver.driver import (
 )
 from graphiti_core.edge_expiry import EdgeExpiryHook, edge_expiry_kwargs
 from graphiti_core.edge_invalidation import EdgeInvalidationHook, edge_invalidation_kwargs
-from graphiti_core.edges import Edge, EntityEdge, EpisodicEdge, create_entity_edge_embeddings
+from graphiti_core.edges import (
+    Edge,
+    EntityEdge,
+    EpisodicEdge,
+    create_entity_edge_embeddings,
+    entity_edge_save_row,
+    save_entity_edge_rows_neo4j,
+)
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.graphiti_types import GraphitiClients, uses_prompt_routing
 from graphiti_core.helpers import normalize_l2, semaphore_gather
@@ -58,6 +65,7 @@ from graphiti_core.utils.maintenance.dedup_helpers import (
 from graphiti_core.utils.maintenance.edge_operations import (
     extract_edges,
     preserved_attributes_kwargs,
+    reconcile_edge_copies,
     resolve_extracted_edge,
 )
 from graphiti_core.utils.maintenance.graph_data_operations import (
@@ -206,37 +214,21 @@ async def add_nodes_and_edges_bulk_tx(
 
         nodes.append(entity_data)
 
+    # Archolith fork: copies of one edge in a batch would leave the stored invalid_at to row
+    # order (menhir#262); give them one merged state first. A no-op for reconciled callers.
+    reconcile_edge_copies(entity_edges, [])
+
     edges = []
     for edge in entity_edges:
         if edge.fact_embedding is None:
             await edge.generate_embedding(embedder)
-        edge_data: dict[str, Any] = {
-            'uuid': edge.uuid,
-            'source_node_uuid': edge.source_node_uuid,
-            'target_node_uuid': edge.target_node_uuid,
-            'name': edge.name,
-            'fact': edge.fact,
-            'group_id': edge.group_id,
-            'episodes': edge.episodes,
-            'created_at': edge.created_at,
-            'expired_at': edge.expired_at,
-            'valid_at': edge.valid_at,
-            'invalid_at': edge.invalid_at,
-            'reference_time': edge.reference_time,
-            'fact_embedding': edge.fact_embedding,
-        }
 
         if driver.provider == GraphProvider.KUZU:
+            edge_data = entity_edge_save_row(edge, with_attributes=False)
             attributes = convert_datetimes_to_strings(edge.attributes) if edge.attributes else {}
             edge_data['attributes'] = json.dumps(attributes)
         else:
-            # Merge attributes without overwriting explicit edge fields.
-            # Attributes may contain stale string versions of typed fields
-            # (e.g. reference_time as ISO string) that would replace the
-            # datetime values set above.
-            for k, v in (edge.attributes or {}).items():
-                if k not in edge_data:
-                    edge_data[k] = v
+            edge_data = entity_edge_save_row(edge)
 
         edges.append(edge_data)
 
@@ -285,10 +277,15 @@ async def add_nodes_and_edges_bulk_tx(
             get_episodic_edge_save_bulk_query(driver.provider),
             episodic_edges=[edge.model_dump() for edge in episodic_edges],
         )
-        await tx.run(
-            get_entity_edge_save_bulk_query(driver.provider),
-            entity_edges=edges,
-        )
+        if driver.provider == GraphProvider.NEO4J:
+            # Archolith fork (menhir#259, #261): loaded edges are never recreated, and the
+            # caller's edges get the expiry the save kept.
+            await save_entity_edge_rows_neo4j(tx.run, entity_edges, edges)
+        else:
+            await tx.run(
+                get_entity_edge_save_bulk_query(driver.provider),
+                entity_edges=edges,
+            )
 
     if publish_fence is not None and fence_uuid is not None:
         await publish_fence.after_write(

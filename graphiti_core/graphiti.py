@@ -16,7 +16,7 @@ limitations under the License.
 
 import json
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from time import time
 from typing import Any
@@ -232,14 +232,43 @@ def _preserved_edge_attribute_names(value: Iterable[str] | None) -> frozenset[st
         raise TypeError(
             'preserved_edge_attributes must be an iterable of property names, not a string'
         )
+    # Archolith fork (menhir#256): a mapping would silently mean its keys.
+    if isinstance(value, Mapping):
+        raise TypeError('preserved_edge_attributes must be an iterable of names, not a mapping')
     names = list(value)
     for name in names:
-        if not isinstance(name, str) or not name.strip():
+        if not isinstance(name, str) or not name.strip() or name != name.strip():
             raise TypeError(
-                'preserved_edge_attributes entries must be non-blank str, '
+                'preserved_edge_attributes entries must be non-blank str without '
+                'surrounding whitespace, '
                 f'got {type(name).__name__} {name!r}'
             )
+    # Core fields are always written from the edge itself, so naming one preserves nothing.
+    core = sorted(set(names) & _CORE_EDGE_FIELDS)
+    if core:
+        raise ValueError(f'preserved_edge_attributes cannot name core edge fields: {core}')
     return frozenset(names)
+
+
+_CORE_EDGE_FIELDS = frozenset(
+    {
+        'uuid',
+        'source_node_uuid',
+        'target_node_uuid',
+        'source_uuid',
+        'target_uuid',
+        'name',
+        'fact',
+        'fact_embedding',
+        'group_id',
+        'episodes',
+        'created_at',
+        'expired_at',
+        'valid_at',
+        'invalid_at',
+        'reference_time',
+    }
+)
 
 
 class Graphiti:
@@ -251,7 +280,17 @@ class Graphiti:
     node_pre_resolution_hook: NodePreResolutionHook | None = None
     edge_expiry_hook: EdgeExpiryHook | None = None
     edge_invalidation_hook: EdgeInvalidationHook | None = None
-    preserved_edge_attributes: frozenset[str] = frozenset()
+
+    # Archolith fork (menhir#256): a property, so a later assignment is validated like the
+    # constructor argument; instances that bypass __init__ still read an empty set.
+    @property
+    def preserved_edge_attributes(self) -> frozenset[str]:
+        return self.__dict__.get('_preserved_edge_attributes', frozenset())
+
+    @preserved_edge_attributes.setter
+    def preserved_edge_attributes(self, value: Iterable[str] | None) -> None:
+        self.__dict__['_preserved_edge_attributes'] = _preserved_edge_attribute_names(value)
+
     # Upstream reads self.max_coroutines on ingestion paths; same no-init default.
     max_coroutines: int | None = None
 
@@ -2500,7 +2539,12 @@ class Graphiti:
         # invalidation list so the LLM is not shown the same fact under two
         # indices. Mirrors resolve_extracted_edges' overlap dedup.
         related_uuids = {related_edge.uuid for related_edge in related_edges}
-        existing_edges = [e for e in existing_edges if e.uuid not in related_uuids]
+        # Archolith fork: an update by an existing uuid never meets its own stored copy as an
+        # invalidation candidate; two copies with different facts would reach the save, and the
+        # last row would win (menhir#251).
+        existing_edges = [
+            e for e in existing_edges if e.uuid not in related_uuids and e.uuid != edge.uuid
+        ]
 
         dedupe_episode = (
             episode

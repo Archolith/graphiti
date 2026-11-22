@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import inspect
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from time import time
 from typing import Any
@@ -39,9 +41,11 @@ from graphiti_core.models.edges.edge_db_queries import (
     NEXT_EPISODE_EDGE_SAVE,
     get_community_edge_save_query,
     get_entity_edge_return_query,
+    get_entity_edge_save_bulk_query,
     get_entity_edge_save_query,
 )
 from graphiti_core.nodes import Node
+from graphiti_core.utils.datetime_utils import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +297,19 @@ class EntityEdge(Edge):
     # over a copy that kept its fetched ones. model_copy/deepcopy carry it; the reset in
     # resolve_extracted_edges clears it before each resolution.
     _attributes_resolved: bool = PrivateAttr(default=False)
+    # In-memory only, never saved: the uuid this object was loaded from the store under. While
+    # it still matches ``uuid`` the Neo4j save never recreates the edge if another writer
+    # deleted it meanwhile (menhir#261). A new uuid saves as a new edge (upstream MERGE), as
+    # does an object rebuilt from model_dump().
+    _loaded_uuid: str | None = PrivateAttr(default=None)
+
+    @property
+    def _loaded_from_store(self) -> bool:
+        return self._loaded_uuid is not None and self._loaded_uuid == self.uuid
+
+    @_loaded_from_store.setter
+    def _loaded_from_store(self, value: bool) -> None:
+        self._loaded_uuid = self.uuid if value else None
 
     @model_validator(mode='before')
     @classmethod
@@ -369,36 +386,27 @@ class EntityEdge(Edge):
             except NotImplementedError:
                 pass
 
-        edge_data: dict[str, Any] = {
-            'source_uuid': self.source_node_uuid,
-            'target_uuid': self.target_node_uuid,
-            'uuid': self.uuid,
-            'name': self.name,
-            'group_id': self.group_id,
-            'fact': self.fact,
-            'fact_embedding': self.fact_embedding,
-            'episodes': self.episodes,
-            'created_at': self.created_at,
-            'expired_at': self.expired_at,
-            'valid_at': self.valid_at,
-            'invalid_at': self.invalid_at,
-            'reference_time': self.reference_time,
-        }
-
         if driver.provider == GraphProvider.KUZU:
+            edge_data = entity_edge_save_row(
+                self, source_key='source_uuid', target_key='target_uuid', with_attributes=False
+            )
             edge_data['attributes'] = json.dumps(self.attributes)
             result = await driver.execute_query(
                 get_entity_edge_save_query(driver.provider),
                 **edge_data,
             )
         else:
-            for k, v in (self.attributes or {}).items():
-                if k not in edge_data:
-                    edge_data[k] = v
+            edge_data = entity_edge_save_row(
+                self, source_key='source_uuid', target_key='target_uuid'
+            )
             result = await driver.execute_query(
-                get_entity_edge_save_query(driver.provider),
+                get_entity_edge_save_query(driver.provider, stored=self._loaded_from_store),
                 edge_data=edge_data,
             )
+            if driver.provider == GraphProvider.NEO4J:
+                records = await entity_edge_save_records(result)
+                report_deleted_edges_not_saved([self], records)
+                apply_saved_expiry([self], records)
 
         logger.debug(f'Saved edge to Graph: {self.uuid}')
 
@@ -995,6 +1003,132 @@ def get_episodic_edge_from_record(record: Any) -> EpisodicEdge:
     )
 
 
+def entity_edge_save_row(
+    edge: EntityEdge,
+    *,
+    source_key: str = 'source_node_uuid',
+    target_key: str = 'target_node_uuid',
+    with_attributes: bool = True,
+) -> dict[str, Any]:
+    """The row a full-replace entity-edge save writes.
+
+    Archolith fork: every save path builds its row here, so none drops a core field (upstream
+    driver ops omitted reference_time, menhir#260) and no attribute replaces one. Attributes can
+    hold stale string copies of typed fields, so a core field always wins over an attribute.
+    """
+    row: dict[str, Any] = {
+        'uuid': edge.uuid,
+        source_key: edge.source_node_uuid,
+        target_key: edge.target_node_uuid,
+        'name': edge.name,
+        'fact': edge.fact,
+        'fact_embedding': edge.fact_embedding,
+        'group_id': edge.group_id,
+        'episodes': edge.episodes,
+        'created_at': edge.created_at,
+        'expired_at': edge.expired_at,
+        'valid_at': edge.valid_at,
+        'invalid_at': edge.invalid_at,
+        'reference_time': edge.reference_time,
+    }
+    if with_attributes:
+        for key, value in (edge.attributes or {}).items():
+            if key not in row:
+                row[key] = value
+    return row
+
+
+async def entity_edge_save_records(result: Any) -> list[Any]:
+    """Records from a save's result: an EagerResult, an (records, ...) tuple or a Neo4j result."""
+    records = getattr(result, 'records', None)
+    if isinstance(records, list):
+        return records
+    if isinstance(result, tuple) and result and isinstance(result[0], list):
+        return result[0]
+    data = getattr(result, 'data', None)
+    if data is not None and inspect.iscoroutinefunction(data):
+        rows = await data()
+        return rows if isinstance(rows, list) else []
+    return []
+
+
+def apply_saved_expiry(edges: Iterable[EntityEdge], records: Iterable[Any]) -> None:
+    """Give in-memory edges the expiry the Neo4j save stored, logging each restore.
+
+    Archolith fork (menhir#259): the Neo4j save keeps an earlier stored expiry over a stale
+    incoming one. Without this the caller's edges, and the AddEpisodeResults built from them,
+    would report an edge live that is stored expired. Records lacking the effective values
+    (other providers) change nothing. For copies of one edge the last row is the stored state.
+    """
+    stored: dict[str, tuple[datetime | None, datetime | None]] = {}
+    for record in records:
+        try:
+            stored[record['uuid']] = (
+                parse_db_date(record['expired_at']),
+                parse_db_date(record['invalid_at']),
+            )
+        except (KeyError, TypeError, IndexError):
+            return
+    for edge in edges:
+        if edge.uuid not in stored:
+            continue
+        expired_at, invalid_at = stored[edge.uuid]
+        if ensure_utc(edge.expired_at) == ensure_utc(expired_at) and ensure_utc(
+            edge.invalid_at
+        ) == ensure_utc(invalid_at):
+            continue
+        logger.info(
+            'Edge %s keeps its stored expiry over a stale save: '
+            'expired_at %s -> %s, invalid_at %s -> %s',
+            edge.uuid,
+            edge.expired_at,
+            expired_at,
+            edge.invalid_at,
+            invalid_at,
+        )
+        edge.expired_at = expired_at
+        edge.invalid_at = invalid_at
+
+
+def report_deleted_edges_not_saved(edges: Iterable[EntityEdge], records: list[Any]) -> None:
+    """Log each edge loaded from the store that the Neo4j save skipped as deleted (menhir#261)."""
+    saved: set[str] = set()
+    for record in records:
+        try:
+            saved.add(record['uuid'])
+        except (KeyError, TypeError, IndexError):
+            return
+    for uuid in sorted({edge.uuid for edge in edges if edge._loaded_from_store} - saved):
+        logger.info(
+            'Edge %s was not saved: no stored copy with its uuid is left '
+            '(deleted by another writer, or an endpoint node is missing)',
+            uuid,
+        )
+
+
+async def save_entity_edge_rows_neo4j(
+    run: Callable[..., Awaitable[Any]], edges: list[EntityEdge], rows: list[dict[str, Any]]
+) -> None:
+    """Run the Neo4j bulk save for ``rows`` (built from ``edges``) and report what it stored.
+
+    Rows of edges loaded from the store use the save that skips an edge another writer deleted
+    (menhir#261); the other rows use the plain save. A uuid counts as loaded when any copy of it
+    was. ``run`` is ``tx.run`` or ``execute_query``.
+    """
+    loaded = {edge.uuid for edge in edges if edge._loaded_from_store}
+    records: list[Any] = []
+    for stored in (False, True):
+        batch = [row for row in rows if (row['uuid'] in loaded) is stored]
+        if batch:
+            result = await run(
+                get_entity_edge_save_bulk_query(GraphProvider.NEO4J, stored=stored),
+                entity_edges=batch,
+            )
+            records.extend(await entity_edge_save_records(result))
+    report_deleted_edges_not_saved(edges, records)
+    apply_saved_expiry(edges, records)
+
+
 def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityEdge:
     episodes = record['episodes']
     if provider == GraphProvider.KUZU:
@@ -1031,6 +1165,7 @@ def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityE
         reference_time=parse_db_date(record.get('reference_time')),
         attributes=attributes,
     )
+    edge._loaded_from_store = True
 
     return edge
 

@@ -1,5 +1,29 @@
 # Changelog — graphiti
 
+## 2026-11-22 — Entity-edge save: one row builder, save-time reconcile, reported expiry
+
+- `edges.py`: `entity_edge_save_row` builds every full-replace save row (all core fields
+  including `reference_time`; attributes never shadow a core field) (menhir#260);
+  `entity_edge_save_records` and `apply_saved_expiry` give in-memory edges the expiry the Neo4j
+  save kept and log each restore (menhir#259).
+- `driver/{neo4j,falkordb,neptune}/operations/entity_edge_ops.py`: rows from
+  `entity_edge_save_row`; `save_bulk` reconciles copies first; Neo4j ops apply the saved expiry.
+  `driver/kuzu/operations/entity_edge_ops.py`: passes `reference_time`.
+- `utils/bulk_utils.py`: `add_nodes_and_edges_bulk_tx` reconciles copies before building rows
+  (menhir#262) and, on Neo4j, applies the saved expiry.
+- `models/edges/edge_db_queries.py`: Neo4j save queries also return `expired_at`/`invalid_at`.
+- `graphiti.py`: `add_triplet` never offers an edge's own stored copy as an invalidation
+  candidate (menhir#251); `preserved_edge_attributes` is a validated property that rejects
+  mappings and core field names (menhir#256).
+- menhir#261: `EntityEdge._loaded_from_store` (set by both record builders); `stored=True`
+  variants of the Neo4j save queries skip an edge another writer deleted instead of recreating
+  it; `save_entity_edge_rows_neo4j` splits bulk batches; `report_deleted_edges_not_saved` logs
+  each skip. The mark is bound to the uuid it was loaded under (`_loaded_uuid`), so an edge
+  given a new uuid (`add_triplet`'s endpoint-mismatch branch) saves as a new edge (PR #28
+  review F1).
+- `preserved_edge_attributes` also rejects names with surrounding whitespace (review F10).
+- `architecture.md`: copies, stale-save, deleted-edge and preserved-attribute sections updated.
+
 ## 2026-11-10 — Publish fence hook and caller-supplied episode uuid (Menhir policy divergence)
 
 - `publish_fence.py` (new): neutral `PublishFence` Protocol (`before_write`, `after_write`) and

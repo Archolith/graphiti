@@ -67,7 +67,7 @@ def entity_edge_from_record(record: Any) -> EntityEdge:
     attributes.pop('invalid_at', None)
     attributes.pop('reference_time', None)
 
-    return EntityEdge(
+    edge = EntityEdge(
         uuid=record['uuid'],
         source_node_uuid=record['source_node_uuid'],
         target_node_uuid=record['target_node_uuid'],
@@ -83,6 +83,9 @@ def entity_edge_from_record(record: Any) -> EntityEdge:
         reference_time=parse_db_date(record.get('reference_time')),
         attributes=attributes,
     )
+    # Archolith fork (menhir#261): the save never recreates an edge loaded from the store.
+    edge._loaded_from_store = True
+    return edge
 
 
 def episodic_node_from_record(record: Any) -> EpisodicNode:
