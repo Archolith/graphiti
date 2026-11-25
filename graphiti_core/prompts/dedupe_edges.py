@@ -17,27 +17,10 @@ limitations under the License.
 from abc import ABC, abstractmethod
 from typing import Any, Protocol, TypedDict
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from .models import ChatPrompt, Message, PromptFunction, PromptVersion
 from .prompt_helpers import to_prompt_json
-
-
-def _coerce_int_list(raw: Any) -> list[int]:
-    if not isinstance(raw, list):
-        return []
-    result: list[int] = []
-    for item in raw:
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, int):
-            result.append(item)
-            continue
-        try:
-            result.append(int(item))
-        except (TypeError, ValueError):
-            continue
-    return result
 
 
 class EdgeDuplicate(BaseModel):
@@ -71,34 +54,6 @@ class EdgeDuplicateBatch(BaseModel):
         ...,
         description='Exactly one resolution per request_id in EDGE REQUESTS.',
     )
-
-    @model_validator(mode='before')
-    @classmethod
-    def _normalize_edge_resolutions(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        raw = data.get('edge_resolutions')
-        if not isinstance(raw, list):
-            return data
-        normalized: list[dict[str, Any]] = []
-        for entry in raw:
-            if not isinstance(entry, dict):
-                continue
-            raw_id = entry.get('request_id')
-            if isinstance(raw_id, bool):
-                continue
-            try:
-                req_id = int(raw_id)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                continue
-            normalized.append(
-                {
-                    'request_id': req_id,
-                    'duplicate_facts': _coerce_int_list(entry.get('duplicate_facts')),
-                    'contradicted_facts': _coerce_int_list(entry.get('contradicted_facts')),
-                }
-            )
-        return {**data, 'edge_resolutions': normalized}
 
 
 class Prompt(Protocol):
@@ -328,8 +283,10 @@ class DedupeEdgesPrompts(ABC):
     @abstractmethod
     def resolve_edge(self, context: dict[str, Any]) -> ChatPrompt: ...
 
-    @abstractmethod
-    def resolve_edges_batch(self, context: dict[str, Any]) -> ChatPrompt: ...
+    def resolve_edges_batch(self, context: dict[str, Any]) -> ChatPrompt:
+        # Not abstract: batching is never used with a custom prompt library, so older
+        # subclasses need not implement it.
+        return ChatPrompt.from_messages(resolve_edges_batch(context))
 
 
 class DefaultDedupeEdgesPrompts(DedupeEdgesPrompts):

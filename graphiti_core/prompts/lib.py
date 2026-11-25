@@ -577,6 +577,11 @@ class _LibraryWithBuiltinSpecs:
         return getattr(self._library, name)
 
 
+# Archolith fork (menhir#91): batching never runs with a custom library, so a library
+# written before the batch prompt existed stays valid without it.
+_OPTIONAL_PROMPT_FUNCTIONS = frozenset({'dedupe_edges.resolve_edges_batch'})
+
+
 def validate_prompt_library(library: Any) -> None:
     """Structurally validate a complete prompt library (duck-typed; ABC not required)."""
     for group_name, function_names in PROMPT_GROUPS.items():
@@ -586,6 +591,8 @@ def validate_prompt_library(library: Any) -> None:
         group = getattr(library, group_name)
         for function_name in function_names:
             if not hasattr(group, function_name):
+                if f'{group_name}.{function_name}' in _OPTIONAL_PROMPT_FUNCTIONS:
+                    continue
                 raise ValueError(f'Prompt library missing function: {group_name}.{function_name}')
 
             function = getattr(group, function_name)
@@ -600,6 +607,8 @@ def validate_prompt_library(library: Any) -> None:
             raise ValueError('Prompt library specs must be a mapping')
         for name, spec in BUILTIN_PROMPT_SPECS.items():
             if name not in specs:
+                if name in _OPTIONAL_PROMPT_FUNCTIONS:
+                    continue
                 raise ValueError(f'Prompt library specs missing entry: {name}')
             lib_spec = specs[name]
             if not isinstance(lib_spec, PromptSpec):

@@ -20,6 +20,8 @@ from datetime import datetime
 from time import time
 from typing import TYPE_CHECKING, Any
 
+import httpx
+import openai
 from pydantic import BaseModel
 from typing_extensions import LiteralString
 
@@ -524,17 +526,10 @@ def _can_batch_edge_dedupe(clients: GraphitiClients | None) -> bool:
         return False
     if prompt_library.dedupe_edges.resolve_edge is not _DEFAULT_RESOLVE_EDGE_PROMPT:
         return False
-    return _dedupe_extracted_edge is _ORIGINAL_DEDUPE_EXTRACTED_EDGE
-
-
-def _effective_batch_char_limit(llm_client: LLMClient, max_chars: int) -> int:
-    guard = getattr(llm_client, 'request_guard', None)
-    configured = getattr(guard, 'configured_ceiling', None)
-    if isinstance(configured, int) and configured > 0:
-        # Leave generous room for static system prompt (~1,100 tokens) and JSON output.
-        guard_budget_chars = max(2_000, int(configured * 2))
-        return min(max_chars, guard_budget_chars)
-    return max_chars
+    return (
+        _dedupe_extracted_edge is _ORIGINAL_DEDUPE_EXTRACTED_EDGE
+        and decide_edge_against_candidates is _ORIGINAL_DECIDE_EDGE_AGAINST_CANDIDATES
+    )
 
 
 def _build_edge_dedupe_request_payload(
@@ -635,7 +630,9 @@ async def _resolve_edge_dedupe_batch_chunk(
             response_model=EdgeDuplicateBatch,
             model_size=ModelSize.small,
         )
-    except RateLimitError:
+    except (RateLimitError, openai.APIError, httpx.HTTPError):
+        # Provider, quota and transport failures would fail every per-edge call the same way;
+        # falling back would multiply the calls against a provider that is already refusing.
         raise
     except Exception:
         logger.warning(
@@ -672,6 +669,20 @@ async def _resolve_edge_dedupe_batch_chunk(
                 '(expected 0..%d); falling back to per-edge resolution',
                 item.request_id,
                 len(chunk_indices) - 1,
+            )
+            return None
+        edge_idx = chunk_indices[item.request_id]
+        duplicate_count = len(related_edges_lists[edge_idx])
+        candidate_count = duplicate_count + len(edge_invalidation_candidates[edge_idx])
+        # Every request numbers its facts from 0, so an out-of-range idx is the only visible sign
+        # of an answer attached to the wrong request. Reject the chunk instead of dropping the idx.
+        if any(not 0 <= idx < duplicate_count for idx in item.duplicate_facts) or any(
+            not 0 <= idx < candidate_count for idx in item.contradicted_facts
+        ):
+            logger.warning(
+                'Batched edge deduplication returned an out-of-range idx for request_id=%s; '
+                'falling back to per-edge resolution',
+                item.request_id,
             )
             return None
         by_req_id[item.request_id] = EdgeDuplicate(
@@ -909,12 +920,17 @@ async def resolve_extracted_edges(
 
     resolver_kwargs = {'clients': clients} if uses_prompt_routing(clients) else {}
     edge_invalidation_candidates: list[list[EntityEdge]] = []
+    # Before the 1.6 prefilter. The trace records these: a dropped candidate was considered, so
+    # commit repair must not decide it again.
+    searched_invalidation_candidates: list[list[EntityEdge]] = []
+    prefilter_emptied: set[int] = set()
     for i, (extracted_edge, related_edges) in enumerate(
         zip(extracted_edges, related_edges_lists, strict=True)
     ):
         invalidation_result = invalidation_results_by_idx.get(i)
         if invalidation_result is None:
             edge_invalidation_candidates.append([])
+            searched_invalidation_candidates.append([])
             continue
         related_uuids = {edge.uuid for edge in related_edges}
         deduplicated = [
@@ -924,7 +940,10 @@ async def resolve_extracted_edges(
         filtered = _prefilter_invalidation_candidates(
             extracted_edge, related_edges, deduplicated
         )
+        if deduplicated and not filtered and not related_edges:
+            prefilter_emptied.add(i)
         edge_invalidation_candidates.append(filtered)
+        searched_invalidation_candidates.append(deduplicated)
 
     logger.debug(
         f'Related edges: {[e.uuid for edges_lst in related_edges_lists for e in edges_lst]}'
@@ -945,7 +964,7 @@ async def resolve_extracted_edges(
     if trace is not None:
         extracted_uuids = {edge.uuid for edge in extracted_edges}
         for extracted_edge, related_edges, existing_edges in zip(
-            extracted_edges, related_edges_lists, edge_invalidation_candidates, strict=True
+            extracted_edges, related_edges_lists, searched_invalidation_candidates, strict=True
         ):
             trace.record_edge_candidates(extracted_edge.uuid, related_edges, existing_edges)
             # An edge is a stored record when the call did not extract it.
@@ -968,7 +987,9 @@ async def resolve_extracted_edges(
             if i not in verbatim_match_indices and (related_edges or existing_edges)
         ]
         if len(semantic_indices) >= 2:
-            char_limit = _effective_batch_char_limit(llm_client, EDGE_DEDUP_BATCH_MAX_CHARS)
+            # A chunk over the request guard's ceiling raises GraphitiRequestTooLargeError before
+            # sending and falls back per-edge.
+            char_limit = EDGE_DEDUP_BATCH_MAX_CHARS
             chunks, _singles = _chunk_edge_dedupe_indices(
                 semantic_indices,
                 extracted_edges,
@@ -995,6 +1016,12 @@ async def resolve_extracted_edges(
                 for result_map in chunk_results:
                     if result_map is not None:
                         precomputed_decisions.update(result_map)
+
+    # The prefilter emptied these edges' candidates and no candidate can be a duplicate or be
+    # contradicted, so "no duplicate, no contradiction" is the decision. It keeps the edge on the
+    # decision path so own-end expiry and edge_expiry_hook still run (see _dedupe_extracted_edge).
+    for i in prefilter_emptied:
+        precomputed_decisions.setdefault(i, EdgeDuplicate(duplicate_facts=[], contradicted_facts=[]))
 
     dedupe_results: list[tuple[EntityEdge, list[EntityEdge], list[EntityEdge] | None]] = list(
         await semaphore_gather(
@@ -1723,12 +1750,15 @@ async def _dedupe_extracted_edge(
         _apply_update_to_own_copy(resolved_edge, extracted_edge)
 
     if precomputed_decision is None:
-        existing_edges = _prefilter_invalidation_candidates(
-            extracted_edge, related_edges, existing_edges
-        )
+        filtered = _prefilter_invalidation_candidates(extracted_edge, related_edges, existing_edges)
+        if existing_edges and not filtered and not related_edges:
+            # The prefilter emptied the candidates. Skip the model call but stay on the decision
+            # path: the zero-candidate return below skips own-end expiry and edge_expiry_hook.
+            precomputed_decision = EdgeDuplicate(duplicate_facts=[], contradicted_facts=[])
+        existing_edges = filtered
 
     # Nothing to compare against, so there is no duplicate and nothing to contradict.
-    if len(related_edges) == 0 and len(existing_edges) == 0:
+    if precomputed_decision is None and len(related_edges) == 0 and len(existing_edges) == 0:
         # Still extract custom attributes and timestamps even when no dedup needed
         edge_model = edge_type_candidates.get(extracted_edge.name) if edge_type_candidates else None
         if edge_model is not None and len(edge_model.model_fields) != 0:
@@ -1769,7 +1799,7 @@ async def _dedupe_extracted_edge(
         related_edges,
         existing_edges,
         clients=clients,
-        precomputed_decision=precomputed_decision,
+        **_precomputed_decision_kwargs(precomputed_decision),
     )
 
     # Fast path: the fact text and endpoints already exist verbatim, so reuse the matching edge.
@@ -1879,6 +1909,7 @@ async def _dedupe_extracted_edge(
 
 
 _ORIGINAL_DEDUPE_EXTRACTED_EDGE = _dedupe_extracted_edge
+_ORIGINAL_DECIDE_EDGE_AGAINST_CANDIDATES = decide_edge_against_candidates
 
 
 async def filter_existing_duplicate_of_edges(

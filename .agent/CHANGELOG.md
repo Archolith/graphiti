@@ -1,5 +1,26 @@
 # Changelog — graphiti
 
+## 2026-11-25 — Review fixes for batched edge deduplication (menhir#91 Path B)
+
+- `edge_operations.py`:
+  - An edge whose invalidation candidates the 1.6 prefilter empties, with no duplicate candidates,
+    gets an empty decision instead of the zero-candidate return. Own-end expiry and
+    `edge_expiry_hook` run for it, as before the prefilter.
+  - `ResolutionTrace` records the candidates from before the prefilter, so commit repair does not
+    decide the dropped ones again.
+  - A batch answer with an idx outside its own request's range rejects the chunk.
+  - `RateLimitError`, `openai.APIError` and `httpx.HTTPError` propagate from a chunk instead of
+    falling back per-edge.
+  - The dead `configured_ceiling` cap is removed; a chunk over the request guard's ceiling falls
+    back per-edge.
+  - `decide_edge_against_candidates` gets `precomputed_decision` only when one exists; replacing
+    that function turns batching off.
+- `prompts/dedupe_edges.py`: batch items validate like `EdgeDuplicate`; the lenient pre-validator is
+  removed. `resolve_edges_batch` is no longer abstract, and `validate_prompt_library` accepts a
+  library without it.
+- Tests: `test_batch_edge_dedupe_review_fixes.py`; the legacy prompt test context gains
+  `edge_requests`. Both batch test files and that test join the compatibility workflow.
+
 ## 2026-11-25 — Batched edge deduplication, temporal invalidation prefilter, and exact-edge pre-search bypass (menhir#91 Path B)
 
 - `graphiti_core/prompts/dedupe_edges.py`, `prompts/names.py`, `prompts/lib.py`,
@@ -9,7 +30,7 @@
 - `graphiti_core/utils/maintenance/edge_operations.py`:
   - Phase 3 batched edge resolution in `resolve_extracted_edges` (`batch_edge_dedupe: bool = True`):
     batches >= 2 semantic edges into bounded chunks (`EDGE_DEDUP_BATCH_MAX_ITEMS = 12`,
-    `EDGE_DEDUP_BATCH_MAX_CHARS = 24_000`, ceiling-aware), validates exact `request_id` bijection
+    `EDGE_DEDUP_BATCH_MAX_CHARS = 24_000`), validates exact `request_id` bijection
     with per-chunk fallback to `dedupe_edges.resolve_edge`, preserves custom prompt routing /
     overrides untouched, and feeds decisions through `_dedupe_extracted_edge` so all provenance,
     attribute, self-copy, and temporal-invalidation logic stays single-sourced.

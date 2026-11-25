@@ -629,6 +629,28 @@ lifecycle telemetry — are wired through these seams in Phase F, which also rem
 the installer; the Menhir-side concise-prompt/truncation-escalation retry loop
 remains Menhir-owned retry policy and is not ported.
 
+## Batched Edge Deduplication (native, fork; menhir#91 Path B)
+
+`resolve_extracted_edges` packs edges that need a model decision into chunks of 2 to
+`EDGE_DEDUP_BATCH_MAX_ITEMS` requests under `EDGE_DEDUP_BATCH_MAX_CHARS`, asks
+`dedupe_edges.resolve_edges_batch` once per chunk, and passes each validated answer to
+`_dedupe_extracted_edge` as `precomputed_decision`. From there the per-edge path runs unchanged:
+`decide_edge_against_candidates` takes the decision in place of its model call, then provenance,
+attributes, the menhir#251 self-copy filter and temporal invalidation with both hooks.
+
+- A chunk is accepted only when every `request_id` appears once and every idx is inside its own
+  request's range. Otherwise, or when the response does not validate, the chunk falls back to one
+  `resolve_edge` call per edge. Provider, quota and transport errors propagate instead.
+- Batching is off under prompt routing (`llm_runtime` or a custom prompt library), when
+  `prompt_library.dedupe_edges.resolve_edge` is replaced, and when `_dedupe_extracted_edge` or
+  `decide_edge_against_candidates` is replaced.
+- The 1.6 prefilter drops invalidation candidates whose window ended before every possible
+  resolved edge starts. When it empties an edge's candidates and the edge has no duplicate
+  candidates, the edge gets an empty decision, not the zero-candidate return, so own-end expiry
+  and `edge_expiry_hook` still run. `ResolutionTrace` records the candidates before the prefilter.
+- Concurrent ingestion's commit repair (`ingestion/phases.py`) decides per edge, without batching
+  or the prefilter.
+
 ## Fork / Upstream Topology
 
 - Canonical clone: `Archolith/graphiti` (`origin`), stays on `main`.
