@@ -453,6 +453,11 @@ def preserved_attributes_kwargs(preserved: frozenset[str]) -> dict[str, Any]:
     return {'preserved_attributes': preserved} if preserved else {}
 
 
+def _precomputed_decision_kwargs(decision: EdgeDuplicate | None) -> dict[str, Any]:
+    """Return resolve kwargs for a precomputed batch decision; empty when unset for legacy mocks."""
+    return {'precomputed_decision': decision} if decision is not None else {}
+
+
 def _find_verbatim_related_edge(
     extracted_edge: EntityEdge, related_edges: list[EntityEdge]
 ) -> EntityEdge | None:
@@ -1003,11 +1008,7 @@ async def resolve_extracted_edges(
                     extracted_edge_types,
                     **resolver_kwargs,
                     **preserved_attributes_kwargs(preserved_attributes),
-                    **(
-                        {'precomputed_decision': precomputed_decisions[i]}
-                        if i in precomputed_decisions
-                        else {}
-                    ),
+                    **_precomputed_decision_kwargs(precomputed_decisions.get(i)),
                 )
                 for i, (extracted_edge, related_edges, existing_edges, extracted_edge_types) in enumerate(
                     zip(
