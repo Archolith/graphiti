@@ -1,5 +1,21 @@
 # Changelog — graphiti
 
+## 2026-11-25 — Cacheable static-first dedupe prompts and default-namespace exact-name lookup (menhir#91, menhir#93)
+
+- `graphiti_core/prompts/dedupe_edges.py`: move all static rules, constraints, and disambiguation
+  examples for `resolve_edge` into `Message(role='system')` (1,091 `o200k_base` tokens, clearing
+  OpenAI's 1,024-token message-boundary cache floor on GPT-5.6+/GPT-6 Luna), leaving only per-edge
+  `<EXISTING FACTS>`, `<FACT INVALIDATION CANDIDATES>`, and `<NEW FACT>` in `role='user'`.
+- `graphiti_core/prompts/dedupe_nodes.py`: move all static rules, naming constraints, and
+  disambiguation examples for `nodes` (1,102 tokens) and `node` (1,091 tokens) into `role='system'`,
+  replacing positional `"Each of the above ENTITIES"` wording and keeping only per-call dynamic
+  messages, entities, candidates, and entity-count reminders in `role='user'`.
+- `graphiti_core/nodes.py`, `graphiti_core/utils/maintenance/node_operations.py`: preserve empty
+  string `group_id == ""` in `EntityNode.get_by_names` and `_collect_exact_name_candidate_nodes`
+  (`is not None` instead of truthiness) so exact-name lookup runs for Menhir's `default` namespace.
+- Tests: `tests/prompts/test_dedupe_prompts_cacheable.py`,
+  `tests/utils/maintenance/test_exact_name_empty_group_id.py`.
+
 ## 2026-11-25 — Sync upstream 0.32.1 (`0.32.1.post1`)
 
 - Merged upstream `v0.32.1` (concurrent ingestion #2154, group-checked UUID operations #2178, identity

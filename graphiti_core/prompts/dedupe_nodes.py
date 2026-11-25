@@ -92,12 +92,103 @@ class Versions(TypedDict):
     nodes: PromptFunction
 
 
+# GPT-5.6+ models (including GPT-6 Luna) reuse cached prompt prefixes only at message boundaries,
+# and OpenAI requires >= 1,024 tokens in the cached prefix. Keep all static rules, output rules,
+# and disambiguation examples in the system message so only per-call context (messages, entities,
+# existing candidates, and batch counts) stays in the user message.
+_DEDUPE_NODES_CORE_RULES = """Entities should only be considered duplicates if they refer to the *same real-world object or concept*.
+Semantic Equivalence: if an abbreviation, shorthand, or descriptive label in EXISTING ENTITIES clearly refers to the same named entity in context, treat them as duplicates.
+
+NEVER mark entities as duplicates if:
+- They are related but distinct.
+- They have similar names or purposes but refer to separate instances, owners, or concepts.
+- One is a part, module, or component inside a broader service or container.
+- They denote distinct versions or deployment environments (e.g., staging vs production, PostgreSQL 14 vs PostgreSQL 16).
+- They denote different people sharing a first name, or a generic role not clearly bound to a named person in context.
+- One is a relative location ("the suburbs", "downtown") and the other is a specific named city.
+
+Output rules:
+- Only return a `candidate_id` that appears in EXISTING ENTITIES; return `-1` when there is no match, EXISTING ENTITIES is empty, or you are unsure.
+- Preserve the original name unless a duplicate has a more complete canonical name; never fabricate details or include `{}`."""
+
+_DEDUPE_NODES_EXAMPLES = """<EXAMPLE>
+ENTITY: "Sam" (Person)
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "Sam", "entity_types": ["Person"], "summary": "Sam enjoys hiking and photography"}]
+Result: duplicate_candidate_id = 0 (same person referenced in conversation)
+
+ENTITY: "NYC"
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "New York City", "entity_types": ["Location"]}, {"candidate_id": 1, "name": "New York Knicks", "entity_types": ["Organization"]}]
+Result: duplicate_candidate_id = 0 (same location, abbreviated name)
+
+ENTITY: "Java" (programming language)
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "Java", "entity_types": ["Location"], "summary": "An island in Indonesia"}]
+Result: duplicate_candidate_id = -1 (same name but distinct real-world things)
+
+ENTITY: "Marco's car"
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "Marco's vehicle", "entity_types": ["Entity"], "summary": "Marco drives a red sedan."}]
+Result: duplicate_candidate_id = 0 (synonym — "car" and "vehicle" refer to the same thing, same possessor)
+
+ENTITY: "the suburbs"
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "Chicago", "entity_types": ["Location"], "summary": "A city where someone lives"}]
+Result: duplicate_candidate_id = -1 (relative/descriptive locations such as the suburbs, downtown, or countryside are never the same object as a specific named city merely because they are related or appear in movement context)
+
+ENTITY: "Alice's laptop"
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "Bob's laptop", "entity_types": ["Entity"], "summary": "Bob's work laptop"}]
+Result: duplicate_candidate_id = -1 (different owners — distinct physical objects)
+
+ENTITY: "auth middleware"
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "backend API", "entity_types": ["Entity"], "summary": "Main HTTP service handling client requests"}]
+Result: duplicate_candidate_id = -1 (component is distinct from its parent service)
+
+ENTITY: "staging cluster"
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "production cluster", "entity_types": ["Entity"], "summary": "Customer-facing Kubernetes cluster"}]
+Result: duplicate_candidate_id = -1 (separate environments must never be merged)
+
+ENTITY: "Postgres"
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "PostgreSQL", "entity_types": ["Entity"], "summary": "Relational database used for order records"}]
+Result: duplicate_candidate_id = 0 (shorthand for the same database; keep fuller name "PostgreSQL")
+
+ENTITY: "Alex Chen"
+EXISTING ENTITIES: [{"candidate_id": 0, "name": "Alex Rivera", "entity_types": ["Person"], "summary": "Product manager on the mobile team"}]
+Result: duplicate_candidate_id = -1 (different surnames — distinct people)
+</EXAMPLE>"""
+
+_DEDUPE_NODE_SYSTEM_PROMPT = f"""You are an entity deduplication assistant. NEVER fabricate entity names or mark distinct entities as duplicates.
+
+You will receive PREVIOUS MESSAGES, CURRENT MESSAGE, NEW ENTITY, ENTITY TYPE DESCRIPTION, and EXISTING ENTITIES in the user message.
+Determine whether NEW ENTITY is a duplicate of any candidate in EXISTING ENTITIES.
+
+{_DEDUPE_NODES_CORE_RULES}
+
+Task:
+1. Compare NEW ENTITY against each candidate in EXISTING ENTITIES (identified by `candidate_id`), using PREVIOUS MESSAGES, CURRENT MESSAGE, and ENTITY TYPE DESCRIPTION for disambiguation.
+2. If NEW ENTITY refers to the same real-world object or concept as an existing candidate, return that candidate's `candidate_id` as `duplicate_candidate_id`.
+3. Return `duplicate_candidate_id = -1` when there is no match, when EXISTING ENTITIES is empty, or when you are unsure.
+
+{_DEDUPE_NODES_EXAMPLES}"""
+
+_DEDUPE_NODES_SYSTEM_PROMPT = f"""You are an entity deduplication assistant. NEVER fabricate entity names or mark distinct entities as duplicates.
+
+You will receive PREVIOUS MESSAGES, CURRENT MESSAGE, ENTITIES, and EXISTING ENTITIES in the user message.
+Each entity in ENTITIES was extracted from CURRENT MESSAGE.
+For each entity in ENTITIES, determine if it is a duplicate of any candidate in EXISTING ENTITIES.
+
+{_DEDUPE_NODES_CORE_RULES}
+
+Task:
+For every entity in ENTITIES (matching the exact count and integer ID range specified in the user message — do not skip or add IDs), provide:
+- `id`: integer id from ENTITIES
+- `name`: the best full name for the entity (preserve the original name unless a duplicate has a more complete name)
+- `duplicate_candidate_id`: the `candidate_id` of the candidate in EXISTING ENTITIES that is the best duplicate match, or -1 if there is no duplicate
+
+{_DEDUPE_NODES_EXAMPLES}"""
+
+
 def node(context: dict[str, Any]) -> list[Message]:
     return [
         Message(
             role='system',
-            content='You are an entity deduplication assistant. '
-            'NEVER fabricate entity names or mark distinct entities as duplicates.',
+            content=_DEDUPE_NODE_SYSTEM_PROMPT,
         ),
         Message(
             role='user',
@@ -121,51 +212,17 @@ def node(context: dict[str, Any]) -> list[Message]:
 <EXISTING ENTITIES>
 {to_prompt_json(context['existing_nodes'])}
 </EXISTING ENTITIES>
-
-Entities should only be considered duplicates if they refer to the *same real-world object or concept*.
-Semantic Equivalence: if a descriptive label in EXISTING ENTITIES clearly refers to a named entity in context, treat them as duplicates.
-
-NEVER mark entities as duplicates if:
-- They are related but distinct.
-- They have similar names or purposes but refer to separate instances or concepts.
-
-Task:
-1. Compare the NEW ENTITY against each EXISTING ENTITY (identified by `candidate_id`).
-2. If it refers to the same real-world object or concept, return the `candidate_id` of that match.
-3. Return `duplicate_candidate_id = -1` when there is no match or you are unsure.
-
-<EXAMPLE>
-NEW ENTITY: "Sam" (Person)
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Sam", "entity_types": ["Person"], "summary": "Sam enjoys hiking and photography"}}]
-Result: duplicate_candidate_id = 0 (same person referenced in conversation)
-
-NEW ENTITY: "NYC"
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "New York City", "entity_types": ["Location"]}}, {{"candidate_id": 1, "name": "New York Knicks", "entity_types": ["Organization"]}}]
-Result: duplicate_candidate_id = 0 (same location, abbreviated name)
-
-NEW ENTITY: "Java" (programming language)
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Java", "entity_types": ["Location"], "summary": "An island in Indonesia"}}]
-Result: duplicate_candidate_id = -1 (same name but distinct real-world things)
-
-NEW ENTITY: "Marco's car"
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Marco's vehicle", "entity_types": ["Entity"], "summary": "Marco drives a red sedan."}}]
-Result: duplicate_candidate_id = 0 (synonym — "car" and "vehicle" refer to the same thing, same possessor)
-
-NEW ENTITY: "the suburbs"
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Chicago", "entity_types": ["Location"], "summary": "A city where someone lives"}}]
-Result: duplicate_candidate_id = -1 (relative/descriptive locations such as the suburbs, downtown, or countryside are never the same object as a specific named city merely because they are related or appear in movement context)
-</EXAMPLE>
 """,
         ),
     ]
 
 
 def nodes(context: dict[str, Any]) -> list[Message]:
+    entity_count = len(context['extracted_nodes'])
     return [
         Message(
             role='system',
-            content='You are an entity deduplication assistant. '
-            'NEVER fabricate entity names or mark distinct entities as duplicates.',
+            content=_DEDUPE_NODES_SYSTEM_PROMPT,
         ),
         Message(
             role='user',
@@ -186,44 +243,8 @@ def nodes(context: dict[str, Any]) -> list[Message]:
 {to_prompt_json(context['existing_nodes'])}
 </EXISTING ENTITIES>
 
-Each of the above ENTITIES was extracted from the CURRENT MESSAGE.
-For each entity, determine if it is a duplicate of any EXISTING ENTITY.
-Entities should only be considered duplicates if they refer to the *same real-world object or concept*.
-
-NEVER mark entities as duplicates if:
-- They are related but distinct.
-- They have similar names or purposes but refer to separate instances or concepts.
-
-Task:
-ENTITIES contains {len(context['extracted_nodes'])} entities with IDs 0 through {len(context['extracted_nodes']) - 1}.
-Your response MUST include EXACTLY {len(context['extracted_nodes'])} resolutions with IDs 0 through {len(context['extracted_nodes']) - 1}. Do not skip or add IDs.
-
-For every entity, provide:
-- `id`: integer id from ENTITIES
-- `name`: the best full name for the entity (preserve the original name unless a duplicate has a more complete name)
-- `duplicate_candidate_id`: the `candidate_id` of the EXISTING ENTITY that is the best duplicate match, or -1 if there is no duplicate
-
-<EXAMPLE>
-ENTITY: "Sam" (Person)
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Sam", "entity_types": ["Person"], "summary": "Sam enjoys hiking and photography"}}]
-Result: duplicate_candidate_id = 0 (same person referenced in conversation)
-
-ENTITY: "NYC"
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "New York City", "entity_types": ["Location"]}}, {{"candidate_id": 1, "name": "New York Knicks", "entity_types": ["Organization"]}}]
-Result: duplicate_candidate_id = 0 (same location, abbreviated name)
-
-ENTITY: "Java" (programming language)
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Java", "entity_types": ["Location"], "summary": "An island in Indonesia"}}]
-Result: duplicate_candidate_id = -1 (same name but distinct real-world things)
-
-ENTITY: "Marco's car"
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Marco's vehicle", "entity_types": ["Entity"], "summary": "Marco drives a red sedan."}}]
-Result: duplicate_candidate_id = 0 (synonym — "car" and "vehicle" refer to the same thing, same possessor)
-
-ENTITY: "the suburbs"
-EXISTING ENTITIES: [{{"candidate_id": 0, "name": "Chicago", "entity_types": ["Location"], "summary": "A city where someone lives"}}]
-Result: duplicate_candidate_id = -1 (relative/descriptive locations such as the suburbs, downtown, or countryside are never the same object as a specific named city merely because they are related or appear in movement context)
-</EXAMPLE>
+ENTITIES contains {entity_count} entities with IDs 0 through {entity_count - 1}.
+Your response MUST include EXACTLY {entity_count} resolutions with IDs 0 through {entity_count - 1}. Do not skip or add IDs.
 """,
         ),
     ]
