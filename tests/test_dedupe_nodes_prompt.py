@@ -48,25 +48,25 @@ def _nodes_context() -> dict[str, Any]:
 
 
 def test_node_prompt_renders_anti_conflation_example_exactly_once() -> None:
-    content = node(_node_context())[1].content
+    content = node(_node_context())[0].content
     assert content.count(ANTI_CONFLATION_NODE_MARKER) == 1
     assert content.count(ANTI_CONFLATION_RESULT) == 1
 
 
 def test_nodes_prompt_renders_anti_conflation_example_exactly_once() -> None:
-    content = nodes(_nodes_context())[1].content
+    content = nodes(_nodes_context())[0].content
     assert content.count(ANTI_CONFLATION_NODES_MARKER) == 1
     assert content.count(ANTI_CONFLATION_RESULT) == 1
 
 
 def test_versions_node_entry_renders_anti_conflation_example_exactly_once() -> None:
-    content = versions['node'](_node_context())[1].content
+    content = versions['node'](_node_context())[0].content
     assert content.count(ANTI_CONFLATION_NODE_MARKER) == 1
     assert content.count(ANTI_CONFLATION_RESULT) == 1
 
 
 def test_versions_nodes_entry_renders_anti_conflation_example_exactly_once() -> None:
-    content = versions['nodes'](_nodes_context())[1].content
+    content = versions['nodes'](_nodes_context())[0].content
     assert content.count(ANTI_CONFLATION_NODES_MARKER) == 1
     assert content.count(ANTI_CONFLATION_RESULT) == 1
 
@@ -88,8 +88,8 @@ def test_node_list_prompt_has_no_anti_conflation_leakage() -> None:
 
 
 def test_rendered_json_braces_are_native_single_braces() -> None:
-    node_content = node(_node_context())[1].content
-    nodes_content = nodes(_nodes_context())[1].content
+    node_content = node(_node_context())[0].content
+    nodes_content = nodes(_nodes_context())[0].content
     chicago_line = (
         'EXISTING ENTITIES: [{"candidate_id": 0, "name": "Chicago", '
         '"entity_types": ["Location"], "summary": "A city where someone lives"}]'
@@ -103,7 +103,7 @@ def test_rendered_json_braces_are_native_single_braces() -> None:
 
 
 def test_node_prompt_preserves_existing_examples_and_response_contract() -> None:
-    content = node(_node_context())[1].content
+    content = node(_node_context())[0].content
     assert 'NEW ENTITY: "Sam" (Person)' in content
     assert 'NEW ENTITY: "NYC"' in content
     assert 'NEW ENTITY: "Java" (programming language)' in content
@@ -115,13 +115,13 @@ def test_node_prompt_preserves_existing_examples_and_response_contract() -> None
 
 
 def test_nodes_prompt_preserves_existing_examples_and_response_contract() -> None:
-    content = nodes(_nodes_context())[1].content
-    assert 'ENTITY: "Sam" (Person)' in content
-    assert 'ENTITY: "NYC"' in content
-    assert 'ENTITY: "Java" (programming language)' in content
-    assert 'ENTITY: "Marco\'s car"' in content
-    assert '`duplicate_candidate_id`: the `candidate_id` of the EXISTING ENTITY' in content
-    assert 'Your response MUST include EXACTLY 1 resolutions with IDs 0 through 0.' in content
+    system_content, user_content = (m.content for m in nodes(_nodes_context()))
+    assert 'ENTITY: "Sam" (Person)' in system_content
+    assert 'ENTITY: "NYC"' in system_content
+    assert 'ENTITY: "Java" (programming language)' in system_content
+    assert 'ENTITY: "Marco\'s car"' in system_content
+    assert '`duplicate_candidate_id`: the `candidate_id` of the EXISTING ENTITY' in system_content
+    assert 'Your response MUST include EXACTLY 1 resolutions with IDs 0 through 0.' in user_content
 
 
 def test_prompts_do_not_mutate_context() -> None:
