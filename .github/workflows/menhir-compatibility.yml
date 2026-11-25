@@ -61,6 +61,7 @@ jobs:
             tests/utils/maintenance/test_edge_dedup_scenarios.py \
             tests/utils/maintenance/test_temporal_edge_utils.py \
             tests/utils/maintenance/test_configurable_prompts.py \
-            tests/test_graphiti_configurable_prompts.py \n            tests/test_concurrent_ingestion_fork_guard.py
+            tests/test_graphiti_configurable_prompts.py \
+            tests/test_concurrent_ingestion_fork_guard.py
       - name: Build distributable
         run: python -m build
