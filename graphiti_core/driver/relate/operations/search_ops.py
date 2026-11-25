@@ -18,22 +18,22 @@ import logging
 from typing import Any
 
 from graphiti_core.driver.driver import GraphProvider
-from graphiti_core.driver.kuzu.operations.record_parsers import (
-    parse_kuzu_entity_edge,
-    parse_kuzu_entity_node,
-)
 from graphiti_core.driver.operations.search_ops import SearchOperations
 from graphiti_core.driver.query_executor import QueryExecutor
 from graphiti_core.driver.record_parsers import (
     community_node_from_record,
+    entity_edge_from_record,
+    entity_node_from_record,
     episodic_node_from_record,
 )
+from graphiti_core.driver.relate.translation import RELATE_MAX_BFS_DEPTH
 from graphiti_core.edges import EntityEdge
 from graphiti_core.graph_queries import (
     get_nodes_query,
     get_relationships_query,
     get_vector_cosine_func_query,
 )
+from graphiti_core.helpers import lucene_sanitize, validate_group_ids
 from graphiti_core.models.edges.edge_db_queries import get_entity_edge_return_query
 from graphiti_core.models.nodes.node_db_queries import (
     COMMUNITY_NODE_RETURN,
@@ -52,24 +52,28 @@ logger = logging.getLogger(__name__)
 MAX_QUERY_LENGTH = 128
 
 
-def _build_kuzu_fulltext_query(
+def _build_relate_fulltext_query(
     query: str,
-    group_ids: list[str] | None = None,  # noqa: ARG001
+    group_ids: list[str] | None = None,
     max_query_length: int = MAX_QUERY_LENGTH,
 ) -> str:
-    """Build a fulltext query string for Kuzu.
+    validate_group_ids(group_ids)
 
-    Kuzu does not use Lucene syntax. The raw query is returned, truncated if it
-    exceeds *max_query_length* words.
-    """
-    words = query.split()
-    if len(words) >= max_query_length:
-        words = words[:max_query_length]
-    truncated = ' '.join(words)
-    return truncated
+    group_ids_filter_list = [f'group_id:"{g}"' for g in group_ids] if group_ids is not None else []
+    group_ids_filter = ''
+    for item in group_ids_filter_list:
+        group_ids_filter += item if not group_ids_filter else f' OR {item}'
+
+    group_ids_filter += ' AND ' if group_ids_filter else ''
+
+    lucene_query = lucene_sanitize(query)
+    if len(lucene_query.split(' ')) + len(group_ids or '') >= max_query_length:
+        return ''
+
+    return group_ids_filter + '(' + lucene_query + ')'
 
 
-class KuzuSearchOperations(SearchOperations):
+class RelateSearchOperations(SearchOperations):
     # --- Node search ---
 
     async def node_fulltext_search(
@@ -80,12 +84,12 @@ class KuzuSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityNode]:
-        fuzzy_query = _build_kuzu_fulltext_query(query, group_ids)
+        fuzzy_query = _build_relate_fulltext_query(query, group_ids)
         if fuzzy_query == '':
             return []
 
         filter_queries, filter_params = node_search_filter_query_constructor(
-            search_filter, GraphProvider.KUZU
+            search_filter, GraphProvider.RELATE
         )
 
         if group_ids is not None:
@@ -98,9 +102,9 @@ class KuzuSearchOperations(SearchOperations):
 
         cypher = (
             get_nodes_query(
-                'node_name_and_summary', '$query', limit=limit, provider=GraphProvider.KUZU
+                'node_name_and_summary', '$query', limit=limit, provider=GraphProvider.RELATE
             )
-            + ' WITH node AS n, score'
+            + 'YIELD node AS n, score'
             + filter_query
             + """
             WITH n, score
@@ -108,7 +112,7 @@ class KuzuSearchOperations(SearchOperations):
             LIMIT $limit
             RETURN
             """
-            + get_entity_node_return_query(GraphProvider.KUZU)
+            + get_entity_node_return_query(GraphProvider.RELATE)
         )
 
         records, _, _ = await executor.execute_query(
@@ -118,7 +122,7 @@ class KuzuSearchOperations(SearchOperations):
             **filter_params,
         )
 
-        return [parse_kuzu_entity_node(r) for r in records]
+        return [entity_node_from_record(r) for r in records]
 
     async def node_similarity_search(
         self,
@@ -130,7 +134,7 @@ class KuzuSearchOperations(SearchOperations):
         min_score: float = 0.6,
     ) -> list[EntityNode]:
         filter_queries, filter_params = node_search_filter_query_constructor(
-            search_filter, GraphProvider.KUZU
+            search_filter, GraphProvider.RELATE
         )
 
         if group_ids is not None:
@@ -141,21 +145,19 @@ class KuzuSearchOperations(SearchOperations):
         if filter_queries:
             filter_query = ' WHERE ' + (' AND '.join(filter_queries))
 
-        search_vector_var = f'CAST($search_vector AS FLOAT[{len(search_vector)}])'
-
         cypher = (
             'MATCH (n:Entity)'
             + filter_query
             + """
             WITH n, """
             + get_vector_cosine_func_query(
-                'n.name_embedding', search_vector_var, GraphProvider.KUZU
+                'n.name_embedding', '$search_vector', GraphProvider.RELATE
             )
             + """ AS score
             WHERE score > $min_score
             RETURN
             """
-            + get_entity_node_return_query(GraphProvider.KUZU)
+            + get_entity_node_return_query(GraphProvider.RELATE)
             + """
             ORDER BY score DESC
             LIMIT $limit
@@ -170,7 +172,7 @@ class KuzuSearchOperations(SearchOperations):
             **filter_params,
         )
 
-        return [parse_kuzu_entity_node(r) for r in records]
+        return [entity_node_from_record(r) for r in records]
 
     async def node_bfs_search(
         self,
@@ -184,115 +186,44 @@ class KuzuSearchOperations(SearchOperations):
         if not origin_uuids or max_depth < 1:
             return []
 
+        clamped_depth = min(max_depth, RELATE_MAX_BFS_DEPTH)
         filter_queries, filter_params = node_search_filter_query_constructor(
-            search_filter, GraphProvider.KUZU
+            search_filter, GraphProvider.RELATE
         )
 
         if group_ids is not None:
             filter_queries.append('n.group_id IN $group_ids')
+            filter_queries.append('origin.group_id IN $group_ids')
             filter_params['group_ids'] = group_ids
 
         filter_query = ''
         if filter_queries:
             filter_query = ' AND ' + (' AND '.join(filter_queries))
 
-        # Kuzu uses RelatesToNode_ as an intermediate node for edges, so each
-        # logical hop is actually 2 hops in the graph.  We need 3 separate
-        # MATCH queries UNIONed together:
-        # 1. Episodic -> MENTIONS -> Entity (direct mention)
-        # 2. Entity -> RELATES_TO*{2..depth*2} -> Entity (entity traversal)
-        # 3. Episodic -> MENTIONS -> Entity -> RELATES_TO*{2..(depth-1)*2} -> Entity (combined)
+        cypher = (
+            f"""
+            UNWIND $bfs_origin_node_uuids AS origin_uuid
+            MATCH (origin {{uuid: origin_uuid}})-[:RELATES_TO|MENTIONS*1..{clamped_depth}]->(n:Entity)
+            WHERE n.group_id = origin.group_id
+            """
+            + filter_query
+            + """
+            RETURN
+            """
+            + get_entity_node_return_query(GraphProvider.RELATE)
+            + """
+            LIMIT $limit
+            """
+        )
 
-        all_records: list[Any] = []
+        records, _, _ = await executor.execute_query(
+            cypher,
+            bfs_origin_node_uuids=origin_uuids,
+            limit=limit,
+            **filter_params,
+        )
 
-        for origin_uuid in origin_uuids:
-            # Query 1: From Episodic origins via MENTIONS
-            cypher_episodic = (
-                """
-                MATCH (origin:Episodic {uuid: $origin_uuid})-[:MENTIONS]->(n:Entity)
-                WHERE n.group_id = origin.group_id
-                """
-                + filter_query
-                + """
-                RETURN
-                """
-                + get_entity_node_return_query(GraphProvider.KUZU)
-                + """
-                LIMIT $limit
-                """
-            )
-
-            records, _, _ = await executor.execute_query(
-                cypher_episodic,
-                origin_uuid=origin_uuid,
-                limit=limit,
-                **filter_params,
-            )
-            all_records.extend(records)
-
-            # Query 2: From Entity origins via RELATES_TO (doubled depth)
-            doubled_depth = max_depth * 2
-            cypher_entity = (
-                f"""
-                MATCH (origin:Entity {{uuid: $origin_uuid}})-[:RELATES_TO*2..{doubled_depth}]->(n:Entity)
-                WHERE n.group_id = origin.group_id
-                """
-                + filter_query
-                + """
-                RETURN
-                """
-                + get_entity_node_return_query(GraphProvider.KUZU)
-                + """
-                LIMIT $limit
-                """
-            )
-
-            records, _, _ = await executor.execute_query(
-                cypher_entity,
-                origin_uuid=origin_uuid,
-                limit=limit,
-                **filter_params,
-            )
-            all_records.extend(records)
-
-            # Query 3: From Episodic through Entity (only if max_depth > 1)
-            if max_depth > 1:
-                combined_depth = (max_depth - 1) * 2
-                cypher_combined = (
-                    f"""
-                    MATCH (origin:Episodic {{uuid: $origin_uuid}})-[:MENTIONS]->(:Entity)-[:RELATES_TO*2..{combined_depth}]->(n:Entity)
-                    WHERE n.group_id = origin.group_id
-                    """
-                    + filter_query
-                    + """
-                    RETURN
-                    """
-                    + get_entity_node_return_query(GraphProvider.KUZU)
-                    + """
-                    LIMIT $limit
-                    """
-                )
-
-                records, _, _ = await executor.execute_query(
-                    cypher_combined,
-                    origin_uuid=origin_uuid,
-                    limit=limit,
-                    **filter_params,
-                )
-                all_records.extend(records)
-
-        # Deduplicate by uuid and limit
-        seen: set[str] = set()
-        unique_nodes: list[EntityNode] = []
-        for r in all_records:
-            node = parse_kuzu_entity_node(r)
-            if node.uuid not in seen:
-                seen.add(node.uuid)
-                unique_nodes.append(node)
-            if len(unique_nodes) >= limit:
-                break
-
-        return unique_nodes
+        return [entity_node_from_record(r) for r in records]
 
     # --- Edge search ---
 
@@ -304,12 +235,12 @@ class KuzuSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityEdge]:
-        fuzzy_query = _build_kuzu_fulltext_query(query, group_ids)
+        fuzzy_query = _build_relate_fulltext_query(query, group_ids)
         if fuzzy_query == '':
             return []
 
         filter_queries, filter_params = edge_search_filter_query_constructor(
-            search_filter, GraphProvider.KUZU
+            search_filter, GraphProvider.RELATE
         )
 
         if group_ids is not None:
@@ -320,20 +251,20 @@ class KuzuSearchOperations(SearchOperations):
         if filter_queries:
             filter_query = ' WHERE ' + (' AND '.join(filter_queries))
 
-        # Kuzu FTS for edges queries the RelatesToNode_ label, then we match
-        # the full pattern to get source (n) and target (m) Entity nodes.
         cypher = (
-            get_relationships_query('edge_name_and_fact', limit=limit, provider=GraphProvider.KUZU)
+            get_relationships_query(
+                'edge_name_and_fact', limit=limit, provider=GraphProvider.RELATE
+            )
             + """
-            WITH node AS e, score
-            MATCH (n:Entity)-[:RELATES_TO]->(e)-[:RELATES_TO]->(m:Entity)
+            YIELD relationship AS rel, score
+            MATCH (n:Entity)-[e:RELATES_TO {uuid: rel.uuid}]->(m:Entity)
             """
             + filter_query
             + """
             WITH e, score, n, m
             RETURN
             """
-            + get_entity_edge_return_query(GraphProvider.KUZU)
+            + get_entity_edge_return_query(GraphProvider.RELATE)
             + """
             ORDER BY score DESC
             LIMIT $limit
@@ -347,7 +278,7 @@ class KuzuSearchOperations(SearchOperations):
             **filter_params,
         )
 
-        return [parse_kuzu_entity_edge(r) for r in records]
+        return [entity_edge_from_record(r) for r in records]
 
     async def edge_similarity_search(
         self,
@@ -361,7 +292,7 @@ class KuzuSearchOperations(SearchOperations):
         min_score: float = 0.6,
     ) -> list[EntityEdge]:
         filter_queries, filter_params = edge_search_filter_query_constructor(
-            search_filter, GraphProvider.KUZU
+            search_filter, GraphProvider.RELATE
         )
 
         if group_ids is not None:
@@ -380,21 +311,19 @@ class KuzuSearchOperations(SearchOperations):
         if filter_queries:
             filter_query = ' WHERE ' + (' AND '.join(filter_queries))
 
-        search_vector_var = f'CAST($search_vector AS FLOAT[{len(search_vector)}])'
-
         cypher = (
-            'MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)'
+            'MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)'
             + filter_query
             + """
             WITH DISTINCT e, n, m, """
             + get_vector_cosine_func_query(
-                'e.fact_embedding', search_vector_var, GraphProvider.KUZU
+                'e.fact_embedding', '$search_vector', GraphProvider.RELATE
             )
             + """ AS score
             WHERE score > $min_score
             RETURN
             """
-            + get_entity_edge_return_query(GraphProvider.KUZU)
+            + get_entity_edge_return_query(GraphProvider.RELATE)
             + """
             ORDER BY score DESC
             LIMIT $limit
@@ -409,7 +338,7 @@ class KuzuSearchOperations(SearchOperations):
             **filter_params,
         )
 
-        return [parse_kuzu_entity_edge(r) for r in records]
+        return [entity_edge_from_record(r) for r in records]
 
     async def edge_bfs_search(
         self,
@@ -420,11 +349,12 @@ class KuzuSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityEdge]:
-        if not origin_uuids:
+        if not origin_uuids or max_depth < 1:
             return []
 
+        clamped_depth = min(max_depth, RELATE_MAX_BFS_DEPTH)
         filter_queries, filter_params = edge_search_filter_query_constructor(
-            search_filter, GraphProvider.KUZU
+            search_filter, GraphProvider.RELATE
         )
 
         if group_ids is not None:
@@ -435,72 +365,34 @@ class KuzuSearchOperations(SearchOperations):
         if filter_queries:
             filter_query = ' WHERE ' + (' AND '.join(filter_queries))
 
-        # Because RelatesToNode_ doubles every hop, we need separate queries
-        # similar to node BFS.
-        all_records: list[Any] = []
-        doubled_depth = max_depth * 2
+        cypher = (
+            f"""
+            UNWIND $bfs_origin_node_uuids AS origin_uuid
+            MATCH path = (origin {{uuid: origin_uuid}})-[:RELATES_TO|MENTIONS*1..{clamped_depth}]->(:Entity)
+            UNWIND relationships(path) AS rel
+            WITH rel AS e, startNode(rel) AS n, endNode(rel) AS m
+            WHERE type(e) = 'RELATES_TO'
+            WITH e, n, m
+            """
+            + filter_query
+            + """
+            RETURN DISTINCT
+            """
+            + get_entity_edge_return_query(GraphProvider.RELATE)
+            + """
+            LIMIT $limit
+            """
+        )
 
-        for origin_uuid in origin_uuids:
-            # From Entity origins: traverse doubled depth to reach RelatesToNode_ edges
-            cypher_entity = (
-                f"""
-                MATCH (origin:Entity {{uuid: $origin_uuid}})-[:RELATES_TO*2..{doubled_depth}]->(e:RelatesToNode_)
-                MATCH (n:Entity)-[:RELATES_TO]->(e)-[:RELATES_TO]->(m:Entity)
-                """
-                + filter_query
-                + """
-                RETURN DISTINCT
-                """
-                + get_entity_edge_return_query(GraphProvider.KUZU)
-                + """
-                LIMIT $limit
-                """
-            )
+        records, _, _ = await executor.execute_query(
+            cypher,
+            bfs_origin_node_uuids=origin_uuids,
+            depth=clamped_depth,
+            limit=limit,
+            **filter_params,
+        )
 
-            records, _, _ = await executor.execute_query(
-                cypher_entity,
-                origin_uuid=origin_uuid,
-                limit=limit,
-                **filter_params,
-            )
-            all_records.extend(records)
-
-            # From Episodic origins: go through MENTIONS to Entity, then traverse
-            cypher_episodic = (
-                """
-                MATCH (origin:Episodic {uuid: $origin_uuid})-[:MENTIONS]->(start:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
-                MATCH (n:Entity)-[:RELATES_TO]->(e)
-                """
-                + filter_query
-                + """
-                RETURN DISTINCT
-                """
-                + get_entity_edge_return_query(GraphProvider.KUZU)
-                + """
-                LIMIT $limit
-                """
-            )
-
-            records, _, _ = await executor.execute_query(
-                cypher_episodic,
-                origin_uuid=origin_uuid,
-                limit=limit,
-                **filter_params,
-            )
-            all_records.extend(records)
-
-        # Deduplicate by uuid and limit
-        seen: set[str] = set()
-        unique_edges: list[EntityEdge] = []
-        for r in all_records:
-            edge = parse_kuzu_entity_edge(r)
-            if edge.uuid not in seen:
-                seen.add(edge.uuid)
-                unique_edges.append(edge)
-            if len(unique_edges) >= limit:
-                break
-
-        return unique_edges
+        return [entity_edge_from_record(r) for r in records]
 
     # --- Episode search ---
 
@@ -512,7 +404,7 @@ class KuzuSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EpisodicNode]:
-        fuzzy_query = _build_kuzu_fulltext_query(query, group_ids)
+        fuzzy_query = _build_relate_fulltext_query(query, group_ids)
         if fuzzy_query == '':
             return []
 
@@ -523,9 +415,9 @@ class KuzuSearchOperations(SearchOperations):
             filter_params['group_ids'] = group_ids
 
         cypher = (
-            get_nodes_query('episode_content', '$query', limit=limit, provider=GraphProvider.KUZU)
+            get_nodes_query('episode_content', '$query', limit=limit, provider=GraphProvider.RELATE)
             + """
-            WITH node AS episode, score
+            YIELD node AS episode, score
             MATCH (e:Episodic)
             WHERE e.uuid = episode.uuid
             """
@@ -555,7 +447,7 @@ class KuzuSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[CommunityNode]:
-        fuzzy_query = _build_kuzu_fulltext_query(query, group_ids)
+        fuzzy_query = _build_relate_fulltext_query(query, group_ids)
         if fuzzy_query == '':
             return []
 
@@ -566,9 +458,9 @@ class KuzuSearchOperations(SearchOperations):
             filter_params['group_ids'] = group_ids
 
         cypher = (
-            get_nodes_query('community_name', '$query', limit=limit, provider=GraphProvider.KUZU)
+            get_nodes_query('community_name', '$query', limit=limit, provider=GraphProvider.RELATE)
             + """
-            WITH node AS c, score
+            YIELD node AS c, score
             WITH c, score
             """
             + group_filter_query
@@ -603,8 +495,6 @@ class KuzuSearchOperations(SearchOperations):
             group_filter_query += ' WHERE c.group_id IN $group_ids'
             query_params['group_ids'] = group_ids
 
-        search_vector_var = f'CAST($search_vector AS FLOAT[{len(search_vector)}])'
-
         cypher = (
             'MATCH (c:Community)'
             + group_filter_query
@@ -612,7 +502,7 @@ class KuzuSearchOperations(SearchOperations):
             WITH c,
             """
             + get_vector_cosine_func_query(
-                'c.name_embedding', search_vector_var, GraphProvider.KUZU
+                'c.name_embedding', '$search_vector', GraphProvider.RELATE
             )
             + """ AS score
             WHERE score > $min_score
@@ -647,18 +537,19 @@ class KuzuSearchOperations(SearchOperations):
         filtered_uuids = [u for u in node_uuids if u != center_node_uuid]
         scores: dict[str, float] = {center_node_uuid: 0.0}
 
-        # Kuzu does not support UNWIND, so query each UUID individually
-        cypher = """
-        MATCH (center:Entity {uuid: $center_uuid})-[:RELATES_TO]->(:RelatesToNode_)-[:RELATES_TO]-(n:Entity {uuid: $node_uuid})
-        RETURN 1 AS score, n.uuid AS uuid
-        """
+        if filtered_uuids:
+            cypher = """
+            UNWIND $node_uuids AS node_uuid
+            MATCH (center:Entity {uuid: $center_uuid})-[:RELATES_TO]-(n:Entity {uuid: node_uuid})
+            RETURN 1 AS score, node_uuid AS uuid
+            """
 
-        for node_uuid in filtered_uuids:
             results, _, _ = await executor.execute_query(
                 cypher,
-                node_uuid=node_uuid,
+                node_uuids=filtered_uuids,
                 center_uuid=center_node_uuid,
             )
+
             for result in results:
                 scores[result['uuid']] = result['score']
 
@@ -677,16 +568,15 @@ class KuzuSearchOperations(SearchOperations):
         if not reranked_uuids:
             return []
 
-        # Fetch the actual EntityNode objects
         get_query = """
             MATCH (n:Entity)
             WHERE n.uuid IN $uuids
             RETURN
-            """ + get_entity_node_return_query(GraphProvider.KUZU)
+            """ + get_entity_node_return_query(GraphProvider.RELATE)
 
         records, _, _ = await executor.execute_query(get_query, uuids=reranked_uuids)
 
-        node_map = {r['uuid']: parse_kuzu_entity_node(r) for r in records}
+        node_map = {r['uuid']: entity_node_from_record(r) for r in records}
         return [node_map[u] for u in reranked_uuids if u in node_map]
 
     async def episode_mentions_reranker(
@@ -700,54 +590,52 @@ class KuzuSearchOperations(SearchOperations):
 
         scores: dict[str, float] = {}
 
-        # Kuzu does not support UNWIND, so query each UUID individually
-        cypher = """
-            MATCH (episode:Episodic)-[r:MENTIONS]->(n:Entity {uuid: $node_uuid})
+        results, _, _ = await executor.execute_query(
+            """
+            UNWIND $node_uuids AS node_uuid
+            MATCH (episode:Episodic)-[r:MENTIONS]->(n:Entity {uuid: node_uuid})
             RETURN count(*) AS score, n.uuid AS uuid
-        """
-        for node_uuid in node_uuids:
-            results, _, _ = await executor.execute_query(
-                cypher,
-                node_uuid=node_uuid,
-            )
-            for result in results:
-                scores[result['uuid']] = result['score']
+            """,
+            node_uuids=node_uuids,
+        )
+
+        for result in results:
+            scores[result['uuid']] = result['score']
 
         for uuid in node_uuids:
             if uuid not in scores:
-                scores[uuid] = float('inf')
+                scores[uuid] = 0
 
         sorted_uuids = list(node_uuids)
-        sorted_uuids.sort(key=lambda cur_uuid: scores[cur_uuid])
+        sorted_uuids.sort(key=lambda cur_uuid: scores[cur_uuid], reverse=True)
 
         reranked_uuids = [u for u in sorted_uuids if scores[u] >= min_score]
 
         if not reranked_uuids:
             return []
 
-        # Fetch the actual EntityNode objects
         get_query = """
             MATCH (n:Entity)
             WHERE n.uuid IN $uuids
             RETURN
-            """ + get_entity_node_return_query(GraphProvider.KUZU)
+            """ + get_entity_node_return_query(GraphProvider.RELATE)
 
         records, _, _ = await executor.execute_query(get_query, uuids=reranked_uuids)
 
-        node_map = {r['uuid']: parse_kuzu_entity_node(r) for r in records}
+        node_map = {r['uuid']: entity_node_from_record(r) for r in records}
         return [node_map[u] for u in reranked_uuids if u in node_map]
 
     # --- Filter builders ---
 
     def build_node_search_filters(self, search_filters: SearchFilters) -> Any:
         filter_queries, filter_params = node_search_filter_query_constructor(
-            search_filters, GraphProvider.KUZU
+            search_filters, GraphProvider.RELATE
         )
         return {'filter_queries': filter_queries, 'filter_params': filter_params}
 
     def build_edge_search_filters(self, search_filters: SearchFilters) -> Any:
         filter_queries, filter_params = edge_search_filter_query_constructor(
-            search_filters, GraphProvider.KUZU
+            search_filters, GraphProvider.RELATE
         )
         return {'filter_queries': filter_queries, 'filter_params': filter_params}
 
@@ -757,6 +645,6 @@ class KuzuSearchOperations(SearchOperations):
         self,
         query: str,
         group_ids: list[str] | None = None,
-        max_query_length: int = 8000,
+        max_query_length: int = MAX_QUERY_LENGTH,
     ) -> str:
-        return _build_kuzu_fulltext_query(query, group_ids, max_query_length)
+        return _build_relate_fulltext_query(query, group_ids, max_query_length)

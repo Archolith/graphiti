@@ -42,7 +42,7 @@ def _episodic_edge_from_record(record: Any) -> EpisodicEdge:
     )
 
 
-class KuzuEpisodicEdgeOperations(EpisodicEdgeOperations):
+class RelateEpisodicEdgeOperations(EpisodicEdgeOperations):
     async def save(
         self,
         executor: QueryExecutor,
@@ -68,22 +68,26 @@ class KuzuEpisodicEdgeOperations(EpisodicEdgeOperations):
         executor: QueryExecutor,
         edges: list[EpisodicEdge],
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
-        # Kuzu doesn't support UNWIND - iterate and save individually
-        query = get_episodic_edge_save_bulk_query(GraphProvider.KUZU)
-        for edge in edges:
-            params: dict[str, Any] = {
-                'source_node_uuid': edge.source_node_uuid,
-                'target_node_uuid': edge.target_node_uuid,
-                'uuid': edge.uuid,
-                'group_id': edge.group_id,
-                'created_at': edge.created_at,
-            }
-            if tx is not None:
-                await tx.run(query, **params)
-            else:
-                await executor.execute_query(query, **params)
+        if not edges:
+            return
+        await self.save_bulk_records(executor, [e.model_dump() for e in edges], tx)
+
+    async def save_bulk_records(
+        self,
+        executor: QueryExecutor,
+        records: list[dict[str, Any]],
+        tx: Transaction | None = None,
+    ) -> None:
+        """Write episodic edge records in a single query."""
+        if not records:
+            return
+        query = get_episodic_edge_save_bulk_query(GraphProvider.RELATE)
+        if tx is not None:
+            await tx.run(query, episodic_edges=records)
+        else:
+            await executor.execute_query(query, episodic_edges=records)
 
     async def delete(
         self,
@@ -92,7 +96,7 @@ class KuzuEpisodicEdgeOperations(EpisodicEdgeOperations):
         tx: Transaction | None = None,
     ) -> None:
         query = """
-            MATCH (n:Episodic)-[e:MENTIONS {uuid: $uuid}]->(m:Entity)
+            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER {uuid: $uuid}]->(m)
             DELETE e
         """
         if tx is not None:
@@ -108,8 +112,10 @@ class KuzuEpisodicEdgeOperations(EpisodicEdgeOperations):
         uuids: list[str],
         tx: Transaction | None = None,
     ) -> None:
+        if not uuids:
+            return
         query = """
-            MATCH (n:Episodic)-[e:MENTIONS]->(m:Entity)
+            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m)
             WHERE e.uuid IN $uuids
             DELETE e
         """
@@ -141,6 +147,8 @@ class KuzuEpisodicEdgeOperations(EpisodicEdgeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[EpisodicEdge]:
+        if not uuids:
+            return []
         query = (
             """
             MATCH (n:Episodic)-[e:MENTIONS]->(m:Entity)

@@ -171,7 +171,7 @@ async def _run_tx(
     return episode, alice, bob, edge
 
 
-@pytest.mark.parametrize('provider', [GraphProvider.NEO4J, GraphProvider.KUZU])
+@pytest.mark.parametrize('provider', [GraphProvider.NEO4J])
 async def test_hooks_bracket_the_saves_after_embeddings(provider):
     log: list[str] = []
     fence = _RecordingFence(log)

@@ -131,9 +131,7 @@ def test_default_neo4j_query_has_no_stored_copy_lock(builder, has_aoss) -> None:
     assert default != builder(GraphProvider.NEO4J, has_aoss=has_aoss, stored=True)
 
 
-@pytest.mark.parametrize(
-    'provider', [GraphProvider.FALKORDB, GraphProvider.NEPTUNE, GraphProvider.KUZU]
-)
+@pytest.mark.parametrize('provider', [GraphProvider.FALKORDB, GraphProvider.NEPTUNE])
 @pytest.mark.parametrize(
     'builder', [get_entity_edge_save_query, get_entity_edge_save_bulk_query], ids=['single', 'bulk']
 )

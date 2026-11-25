@@ -88,6 +88,8 @@ async def test_stored_copy_of_the_incoming_edge_is_not_an_invalidation_candidate
             new=AsyncMock(side_effect=[source, target]),
         ),
         patch('graphiti_core.graphiti.EntityEdge.get_by_uuid', new=AsyncMock(return_value=stored)),
+        # upstream 0.32 checks the edge's episodes belong to its group
+        patch('graphiti_core.graphiti.EpisodicNode.get_by_uuids', new=AsyncMock(return_value=[])),
         patch('graphiti_core.graphiti.search', new=search_mock),
         patch('graphiti_core.graphiti.resolve_extracted_edge', new=fake_resolve),
         patch('graphiti_core.graphiti.create_entity_edge_embeddings', new=AsyncMock()),
@@ -164,6 +166,8 @@ async def test_stored_copy_from_the_same_pair_search_is_never_invalidated(
             new=AsyncMock(side_effect=[source, target]),
         ),
         patch('graphiti_core.graphiti.EntityEdge.get_by_uuid', new=AsyncMock(return_value=stored)),
+        # upstream 0.32 checks the edge's episodes belong to its group
+        patch('graphiti_core.graphiti.EpisodicNode.get_by_uuids', new=AsyncMock(return_value=[])),
         patch('graphiti_core.graphiti.search', new=search_mock),
         patch(
             'graphiti_core.utils.maintenance.edge_operations.generate_prompt_response',
@@ -243,6 +247,8 @@ async def test_old_copy_is_still_invalidated_when_the_update_resolves_to_another
             new=AsyncMock(side_effect=[source, target]),
         ),
         patch('graphiti_core.graphiti.EntityEdge.get_by_uuid', new=AsyncMock(return_value=stored)),
+        # upstream 0.32 checks the edge's episodes belong to its group
+        patch('graphiti_core.graphiti.EpisodicNode.get_by_uuids', new=AsyncMock(return_value=[])),
         patch('graphiti_core.graphiti.search', new=search_mock),
         patch(
             'graphiti_core.utils.maintenance.edge_operations.generate_prompt_response',
@@ -327,6 +333,8 @@ async def test_update_wins_when_resolved_to_its_own_stored_copy(mock_embedder, p
             new=AsyncMock(side_effect=[source, target]),
         ),
         patch('graphiti_core.graphiti.EntityEdge.get_by_uuid', new=AsyncMock(return_value=stored)),
+        # upstream 0.32 checks the edge's episodes belong to its group
+        patch('graphiti_core.graphiti.EpisodicNode.get_by_uuids', new=AsyncMock(return_value=[])),
         patch('graphiti_core.graphiti.search', new=search_mock),
         patch(
             'graphiti_core.utils.maintenance.edge_operations.generate_prompt_response',
@@ -415,6 +423,8 @@ async def test_own_copy_duplicate_takes_the_validity_window_as_one_value(
             new=AsyncMock(side_effect=[source, target]),
         ),
         patch('graphiti_core.graphiti.EntityEdge.get_by_uuid', new=AsyncMock(return_value=stored)),
+        # upstream 0.32 checks the edge's episodes belong to its group
+        patch('graphiti_core.graphiti.EpisodicNode.get_by_uuids', new=AsyncMock(return_value=[])),
         patch('graphiti_core.graphiti.search', new=search_mock),
         patch(
             'graphiti_core.utils.maintenance.edge_operations.generate_prompt_response',

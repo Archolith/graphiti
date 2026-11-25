@@ -707,3 +707,15 @@ re-applied on top:
   untyped defensive attribute copy there.
 - `Graphiti.max_coroutines` has a class-level default like the fork hook attributes, for
   instances built without `__init__`.
+
+## Known limitations: concurrent ingestion (upstream 0.32.1)
+
+The concurrent-ingestion path (`graphiti_core/ingestion/`, and `bulk_utils.update_entity_edges_tx` /
+`edge_update_bulk`) does not carry the fork's hooks, its combined extraction route, or its in-memory
+saved-expiry correction and edge-copy reconciliation. On Neo4j the bulk update query is built from the
+keep-stored-expiry save query, so a stored expiry survives in the database, but the results can report
+an edge as live that is stored as expired. The path is guarded only when a seam is in use:
+`Graphiti.add_episode`, `Graphiti.add_episode_bulk`, `ConcurrentIngestor.add_episode` and
+`ConcurrentIngestor.add_episode_bulk` raise `ValueError` when `new_episode_uuid`, `publish_fence`, a fork
+hook or `preserved_edge_attributes` is set (`Graphiti._reject_fork_seams_for_concurrent_ingestion`).
+Menhir does not enable concurrent ingestion. Threading the seams through `ingestion/` is separate work.

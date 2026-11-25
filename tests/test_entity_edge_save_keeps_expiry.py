@@ -42,9 +42,7 @@ def test_lock_then_read_then_replace_then_restore(row, query) -> None:
         assert vector > positions[-2]
 
 
-@pytest.mark.parametrize(
-    'provider', [GraphProvider.FALKORDB, GraphProvider.NEPTUNE, GraphProvider.KUZU]
-)
+@pytest.mark.parametrize('provider', [GraphProvider.FALKORDB, GraphProvider.NEPTUNE])
 def test_other_providers_keep_the_upstream_save(provider) -> None:
     # Only the Neo4j save carries the guard; the other providers are unchanged (documented).
     for query in (get_entity_edge_save_query(provider), get_entity_edge_save_bulk_query(provider)):

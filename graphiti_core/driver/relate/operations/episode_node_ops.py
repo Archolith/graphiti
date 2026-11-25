@@ -25,6 +25,7 @@ from graphiti_core.driver.record_parsers import episodic_node_from_record
 from graphiti_core.errors import NodeNotFoundError
 from graphiti_core.models.nodes.node_db_queries import (
     EPISODIC_NODE_RETURN,
+    get_episode_node_save_bulk_query,
     get_episode_node_save_query,
 )
 from graphiti_core.nodes import EpisodicNode
@@ -32,14 +33,14 @@ from graphiti_core.nodes import EpisodicNode
 logger = logging.getLogger(__name__)
 
 
-class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
+class RelateEpisodeNodeOperations(EpisodeNodeOperations):
     async def save(
         self,
         executor: QueryExecutor,
         node: EpisodicNode,
         tx: Transaction | None = None,
     ) -> None:
-        query = get_episode_node_save_query(GraphProvider.KUZU)
+        query = get_episode_node_save_query(GraphProvider.RELATE)
         params: dict[str, Any] = {
             'uuid': node.uuid,
             'name': node.name,
@@ -63,11 +64,41 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
         executor: QueryExecutor,
         nodes: list[EpisodicNode],
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
-        # Kuzu doesn't support UNWIND - iterate and save individually
+        if not nodes:
+            return
+
+        episodes = []
         for node in nodes:
-            await self.save(executor, node, tx=tx)
+            ep = dict(node)
+            ep['source'] = str(ep['source'].value)
+            ep.pop('labels', None)
+            ep.pop('episode_metadata', None)
+            episodes.append(ep)
+
+        await self.save_bulk_records(executor, episodes, tx)
+
+    async def save_bulk_records(
+        self,
+        executor: QueryExecutor,
+        records: list[dict[str, Any]],
+        tx: Transaction | None = None,
+    ) -> None:
+        """Write episode records, with `source` as a string, in a single query."""
+        if not records:
+            return
+        episodes = []
+        for record in records:
+            episode = dict(record)
+            episode.pop('labels', None)
+            episode.pop('episode_metadata', None)
+            episodes.append(episode)
+        query = get_episode_node_save_bulk_query(GraphProvider.RELATE)
+        if tx is not None:
+            await tx.run(query, episodes=episodes)
+        else:
+            await executor.execute_query(query, episodes=episodes)
 
     async def delete(
         self,
@@ -76,8 +107,12 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
         tx: Transaction | None = None,
     ) -> None:
         query = """
-            MATCH (n:Episodic {uuid: $uuid})
+            MATCH (n {uuid: $uuid})
+            WHERE n:Entity OR n:Episodic OR n:Community
+            OPTIONAL MATCH (n)-[r]-()
+            WITH collect(r.uuid) AS edge_uuids, n
             DETACH DELETE n
+            RETURN edge_uuids
         """
         if tx is not None:
             await tx.run(query, uuid=node.uuid)
@@ -91,9 +126,8 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
         executor: QueryExecutor,
         group_id: str,
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
-        # Kuzu doesn't support IN TRANSACTIONS OF - simple delete
         query = """
             MATCH (n:Episodic {group_id: $group_id})
             DETACH DELETE n
@@ -108,9 +142,10 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
         executor: QueryExecutor,
         uuids: list[str],
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
-        # Kuzu doesn't support IN TRANSACTIONS OF - simple delete
+        if not uuids:
+            return
         query = """
             MATCH (n:Episodic)
             WHERE n.uuid IN $uuids
@@ -144,6 +179,8 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[EpisodicNode]:
+        if not uuids:
+            return []
         query = (
             """
             MATCH (e:Episodic)
@@ -175,7 +212,7 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
             """
             + EPISODIC_NODE_RETURN
             + """
-            ORDER BY uuid DESC
+            ORDER BY e.uuid DESC
             """
             + limit_clause
         )
@@ -212,7 +249,7 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
         saga: str | None = None,
     ) -> list[EpisodicNode]:
         if saga is not None and group_ids is not None and len(group_ids) > 0:
-            source_clause = 'AND e.source = $source' if source else ''
+            source_clause = ' AND e.source = $source' if source else ''
             query = (
                 """
                 MATCH (s:Saga {name: $saga_name, group_id: $group_id})-[:HAS_EPISODE]->(e:Episodic)
@@ -224,7 +261,7 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
                 """
                 + EPISODIC_NODE_RETURN
                 + """
-                ORDER BY e.valid_at DESC
+                ORDER BY e.valid_at DESC, e.created_at DESC
                 LIMIT $num_episodes
                 """
             )
@@ -237,8 +274,8 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
                 num_episodes=last_n,
             )
         else:
-            source_clause = 'AND e.source = $source' if source else ''
-            group_clause = 'AND e.group_id IN $group_ids' if group_ids else ''
+            source_clause = ' AND e.source = $source' if source else ''
+            group_clause = ' AND e.group_id IN $group_ids' if group_ids else ''
             query = (
                 """
                 MATCH (e:Episodic)
@@ -251,7 +288,7 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
                 """
                 + EPISODIC_NODE_RETURN
                 + """
-                ORDER BY e.valid_at DESC
+                ORDER BY e.valid_at DESC, e.created_at DESC
                 LIMIT $num_episodes
                 """
             )
@@ -263,4 +300,5 @@ class KuzuEpisodeNodeOperations(EpisodeNodeOperations):
                 num_episodes=last_n,
             )
 
-        return [episodic_node_from_record(r) for r in records]
+        episodes = [episodic_node_from_record(r) for r in records]
+        return list(reversed(episodes))

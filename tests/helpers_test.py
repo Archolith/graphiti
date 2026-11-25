@@ -48,15 +48,14 @@ if os.getenv('DISABLE_FALKORDB') is None:
     except ImportError:
         raise
 
-# Kuzu is deprecated (upstream project no longer maintained) and is excluded from the
-# default test matrix. Set ENABLE_KUZU=1 to include it while the driver still ships.
-if os.getenv('ENABLE_KUZU') is not None and os.getenv('DISABLE_KUZU') is None:
+if os.getenv('DISABLE_RELATE') is None:
     try:
-        from graphiti_core.driver.kuzu_driver import KuzuDriver
+        from graphiti_core.driver.relate_driver import RelateDriver
 
-        drivers.append(GraphProvider.KUZU)
+        drivers.append(GraphProvider.RELATE)
     except ImportError:
-        raise
+        # relate-db is an optional extra; skip the Relate provider when it is absent.
+        pass
 
 # Disable Neptune for now
 os.environ['DISABLE_NEPTUNE'] = 'True'
@@ -81,8 +80,6 @@ NEPTUNE_HOST = os.getenv('NEPTUNE_HOST', 'localhost')
 NEPTUNE_PORT = os.getenv('NEPTUNE_PORT', 8182)
 AOSS_HOST = os.getenv('AOSS_HOST', None)
 
-KUZU_DB = os.getenv('KUZU_DB', ':memory:')
-
 group_id = 'graphiti_test_group'
 group_id_2 = 'graphiti_test_group_2'
 
@@ -101,17 +98,14 @@ def get_driver(provider: GraphProvider) -> GraphDriver:
             username=FALKORDB_USER,
             password=FALKORDB_PASSWORD,
         )
-    elif provider == GraphProvider.KUZU:
-        driver = KuzuDriver(
-            db=KUZU_DB,
-        )
-        return driver
     elif provider == GraphProvider.NEPTUNE:
         return NeptuneDriver(
             host=NEPTUNE_HOST,
             port=int(NEPTUNE_PORT),
             aoss_host=AOSS_HOST,
         )
+    elif provider == GraphProvider.RELATE:
+        return RelateDriver()
     else:
         raise ValueError(f'Driver {provider} not available')
 

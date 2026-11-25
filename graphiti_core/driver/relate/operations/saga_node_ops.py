@@ -21,35 +21,30 @@ from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.saga_node_ops import SagaNodeOperations
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
 from graphiti_core.errors import NodeNotFoundError
-from graphiti_core.helpers import parse_db_date
 from graphiti_core.models.nodes.node_db_queries import SAGA_NODE_RETURN, get_saga_node_save_query
-from graphiti_core.nodes import SagaNode
+from graphiti_core.nodes import SagaNode, get_saga_node_from_record
 
 logger = logging.getLogger(__name__)
 
 
-def _saga_node_from_record(record: Any) -> SagaNode:
-    return SagaNode(
-        uuid=record['uuid'],
-        name=record['name'],
-        group_id=record['group_id'],
-        created_at=parse_db_date(record['created_at']),  # type: ignore[arg-type]
-    )
-
-
-class KuzuSagaNodeOperations(SagaNodeOperations):
+class RelateSagaNodeOperations(SagaNodeOperations):
     async def save(
         self,
         executor: QueryExecutor,
         node: SagaNode,
         tx: Transaction | None = None,
     ) -> None:
-        query = get_saga_node_save_query(GraphProvider.KUZU)
+        query = get_saga_node_save_query(GraphProvider.RELATE)
         params: dict[str, Any] = {
             'uuid': node.uuid,
             'name': node.name,
             'group_id': node.group_id,
             'created_at': node.created_at,
+            'summary': node.summary,
+            'first_episode_uuid': node.first_episode_uuid,
+            'last_episode_uuid': node.last_episode_uuid,
+            'last_summarized_at': node.last_summarized_at,
+            'last_summarized_episode_valid_at': node.last_summarized_episode_valid_at,
         }
         if tx is not None:
             await tx.run(query, **params)
@@ -63,9 +58,8 @@ class KuzuSagaNodeOperations(SagaNodeOperations):
         executor: QueryExecutor,
         nodes: list[SagaNode],
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
-        # Kuzu doesn't support UNWIND - iterate and save individually
         for node in nodes:
             await self.save(executor, node, tx=tx)
 
@@ -91,9 +85,8 @@ class KuzuSagaNodeOperations(SagaNodeOperations):
         executor: QueryExecutor,
         group_id: str,
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
-        # Kuzu doesn't support IN TRANSACTIONS OF - simple delete
         query = """
             MATCH (n:Saga {group_id: $group_id})
             DETACH DELETE n
@@ -108,9 +101,10 @@ class KuzuSagaNodeOperations(SagaNodeOperations):
         executor: QueryExecutor,
         uuids: list[str],
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
-        # Kuzu doesn't support IN TRANSACTIONS OF - simple delete
+        if not uuids:
+            return
         query = """
             MATCH (n:Saga)
             WHERE n.uuid IN $uuids
@@ -134,7 +128,7 @@ class KuzuSagaNodeOperations(SagaNodeOperations):
             + SAGA_NODE_RETURN
         )
         records, _, _ = await executor.execute_query(query, uuid=uuid)
-        nodes = [_saga_node_from_record(r) for r in records]
+        nodes = [get_saga_node_from_record(r) for r in records]
         if len(nodes) == 0:
             raise NodeNotFoundError(uuid)
         return nodes[0]
@@ -144,6 +138,8 @@ class KuzuSagaNodeOperations(SagaNodeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[SagaNode]:
+        if not uuids:
+            return []
         query = (
             """
             MATCH (s:Saga)
@@ -153,7 +149,7 @@ class KuzuSagaNodeOperations(SagaNodeOperations):
             + SAGA_NODE_RETURN
         )
         records, _, _ = await executor.execute_query(query, uuids=uuids)
-        return [_saga_node_from_record(r) for r in records]
+        return [get_saga_node_from_record(r) for r in records]
 
     async def get_by_group_ids(
         self,
@@ -185,4 +181,4 @@ class KuzuSagaNodeOperations(SagaNodeOperations):
             uuid=uuid_cursor,
             limit=limit,
         )
-        return [_saga_node_from_record(r) for r in records]
+        return [get_saga_node_from_record(r) for r in records]

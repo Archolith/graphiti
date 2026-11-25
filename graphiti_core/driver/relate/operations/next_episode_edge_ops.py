@@ -40,7 +40,7 @@ def _next_episode_edge_from_record(record: Any) -> NextEpisodeEdge:
     )
 
 
-class KuzuNextEpisodeEdgeOperations(NextEpisodeEdgeOperations):
+class RelateNextEpisodeEdgeOperations(NextEpisodeEdgeOperations):
     async def save(
         self,
         executor: QueryExecutor,
@@ -66,7 +66,7 @@ class KuzuNextEpisodeEdgeOperations(NextEpisodeEdgeOperations):
         executor: QueryExecutor,
         edges: list[NextEpisodeEdge],
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
         for edge in edges:
             await self.save(executor, edge, tx=tx)
@@ -94,6 +94,8 @@ class KuzuNextEpisodeEdgeOperations(NextEpisodeEdgeOperations):
         uuids: list[str],
         tx: Transaction | None = None,
     ) -> None:
+        if not uuids:
+            return
         query = """
             MATCH (n:Episodic)-[e:NEXT_EPISODE]->(m:Episodic)
             WHERE e.uuid IN $uuids
@@ -127,6 +129,8 @@ class KuzuNextEpisodeEdgeOperations(NextEpisodeEdgeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[NextEpisodeEdge]:
+        if not uuids:
+            return []
         query = (
             """
             MATCH (n:Episodic)-[e:NEXT_EPISODE]->(m:Episodic)

@@ -9,6 +9,7 @@ response-shape variants, and hook isolation across requests.
 import json
 from types import SimpleNamespace
 
+import httpx
 import openai
 import pytest
 from pydantic import BaseModel
@@ -223,10 +224,9 @@ async def test_resolver_receives_request_scoped_context():
 
 
 def _openai_context_length_error() -> openai.BadRequestError:
-    request = SimpleNamespace(
-        method='POST', url='http://127.0.0.1:8080/v1/chat/completions', headers={}
-    )
-    response = SimpleNamespace(status_code=400, headers={}, request=request)
+    # Real httpx objects: openai 3.x reads response.history and request.headers.
+    request = httpx.Request('POST', 'http://127.0.0.1:8080/v1/chat/completions')
+    response = httpx.Response(400, request=request)
     return openai.BadRequestError(
         message="This model's maximum context length is 4096 tokens",
         response=response,
@@ -539,7 +539,9 @@ async def test_rate_limit_failure_is_observable_exactly_once():
     listener = RecordingFailureListener()
     rate_limit = openai.RateLimitError(
         message='slow down',
-        response=SimpleNamespace(status_code=429, headers={}, request=None),
+        response=httpx.Response(
+            429, request=httpx.Request('POST', 'http://127.0.0.1:8080/v1/chat/completions')
+        ),
         body=None,
     )
     client, completions = _make_identifying_client(

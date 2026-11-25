@@ -19,7 +19,7 @@ import logging
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from time import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -107,7 +107,7 @@ from graphiti_core.utils.bulk_utils import (
     resolve_edge_pointers,
     retrieve_previous_episodes_bulk,
 )
-from graphiti_core.utils.datetime_utils import utc_now
+from graphiti_core.utils.datetime_utils import ensure_utc, utc_now
 from graphiti_core.utils.maintenance.combined_extraction import extract_nodes_and_edges
 from graphiti_core.utils.maintenance.community_operations import (
     build_communities,
@@ -131,16 +131,26 @@ from graphiti_core.utils.maintenance.graph_data_operations import (
 )
 from graphiti_core.utils.maintenance.node_operations import (
     _extract_entity_summaries_batch,
+    _identity_type_for_node,
     extract_attributes_from_nodes,
+    extract_attributes_only_from_nodes,
     extract_nodes,
     resolve_extracted_nodes,
 )
-from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types
+from graphiti_core.utils.ontology_utils.entity_types_utils import (
+    validate_entity_types,
+    validate_identity_properties,
+)
 from graphiti_core.utils.text_utils import (
     SAGA_SUMMARY_MAX_CHARS,
     truncate_at_sentence,
     truncate_utf8_to_bytes,
 )
+
+if TYPE_CHECKING:
+    from graphiti_core.ingestion.change_set import ResolutionTrace
+    from graphiti_core.ingestion.config import ConcurrentIngestionConfig
+    from graphiti_core.ingestion.scheduler import ConcurrentIngestor
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +167,25 @@ MAX_SAGA_EPISODES_FOR_SUMMARY = 20
 SUMMARY_REBUILD_BATCH_SIZE = 10
 SAGA_SUMMARY_MAX_TOKENS = 8192
 _SAGA_SUMMARY_SCHEMA_WRAPPER = '\n\nRespond with a JSON object in the following format:\n\n'
+
+
+def _validate_saga_group(saga: str | SagaNode | None, group_id: str) -> None:
+    if isinstance(saga, SagaNode) and saga.group_id != group_id:
+        raise ValueError(f'saga {saga.uuid} does not belong to group {group_id}')
+
+
+async def _validate_saga_scope(
+    saga: str | SagaNode | None, group_id: str, driver: GraphDriver
+) -> None:
+    _validate_saga_group(saga, group_id)
+    if not isinstance(saga, SagaNode):
+        return
+    try:
+        stored_saga = await SagaNode.get_by_uuid(driver, saga.uuid)
+    except NodeNotFoundError:
+        return
+    if stored_saga.group_id != group_id:
+        raise NodeNotFoundError(saga.uuid)
 
 
 def _saga_summary_messages_utf8_bytes(messages: list) -> int:
@@ -275,6 +304,7 @@ class Graphiti:
     # Class-level default so instances that bypass __init__ (subclasses, test
     # doubles, unpickled-style instances) safely observe "no hook configured" and
     # keep the legacy no-hook resolver signature; __init__ overrides per instance.
+    single_episode_extraction_hook: SingleEpisodeExtractionHook | None = None
     identity_gate_hook: IdentityGateHook | None = None
     candidate_filter_hook: CandidateFilterHook | None = None
     node_pre_resolution_hook: NodePreResolutionHook | None = None
@@ -316,6 +346,7 @@ class Graphiti:
         edge_expiry_hook: EdgeExpiryHook | None = None,
         edge_invalidation_hook: EdgeInvalidationHook | None = None,
         preserved_edge_attributes: Iterable[str] | None = None,
+        concurrent_ingestion: 'ConcurrentIngestionConfig | None' = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -434,6 +465,12 @@ class Graphiti:
             Names of edge properties a caller stores outside Graphiti. On a resolved
             duplicate they keep their stored values when resolution recomputes or
             clears attributes, so the edge save does not drop them.
+        concurrent_ingestion : ConcurrentIngestionConfig | None, optional
+            The configuration of concurrent ingestion for one graph. With a value,
+            ``add_episode`` and ``add_episode_bulk`` run the extraction and the
+            resolution of many units of one ``group_id`` at the same time, and they
+            commit the units in sequence order. With the default ``None``, the two
+            methods run serial ingestion.
 
         Returns
         -------
@@ -519,6 +556,11 @@ class Graphiti:
             llm_runtime=self.llm_runtime,
             max_coroutines=self.max_coroutines,
         )
+
+        # Concurrent ingestion is off when there is no configuration. The scheduler
+        # and the state store are made on the first call that uses the mode.
+        self.concurrent_ingestion = concurrent_ingestion
+        self._concurrent_ingestor: ConcurrentIngestor | None = None
 
         # Initialize namespace API (graphiti.nodes.entity.save(), etc.)
         self.nodes = NodeNamespace(self.driver, self.embedder)
@@ -640,7 +682,52 @@ class Graphiti:
             finally:
                 graphiti.close()
         """
+        concurrent_ingestion = getattr(self, 'concurrent_ingestion', None)
+        if concurrent_ingestion is not None and concurrent_ingestion.state_store is not None:
+            await concurrent_ingestion.state_store.close()
         await self.driver.close()
+
+    def _concurrent_ingestion_enabled(self, group_id: str) -> bool:
+        """Return True when a call for the graph must use concurrent ingestion."""
+        # An object that a test made with no call of `__init__` has no configuration.
+        config = getattr(self, 'concurrent_ingestion', None)
+        if config is None:
+            return False
+        return config.enabled_for_group is None or config.enabled_for_group(group_id)
+
+    def _reject_fork_seams_for_concurrent_ingestion(
+        self,
+        new_episode_uuid: str | None = None,
+        publish_fence: PublishFence | None = None,
+    ) -> None:
+        """Raise when a fork seam is in use, because concurrent ingestion does not carry them."""
+        seams = {
+            'new_episode_uuid': new_episode_uuid,
+            'publish_fence': publish_fence,
+            'single_episode_extraction_hook': self.single_episode_extraction_hook,
+            'identity_gate_hook': self.identity_gate_hook,
+            'candidate_filter_hook': self.candidate_filter_hook,
+            'node_pre_resolution_hook': self.node_pre_resolution_hook,
+            'edge_expiry_hook': self.edge_expiry_hook,
+            'edge_invalidation_hook': self.edge_invalidation_hook,
+            'preserved_edge_attributes': self.preserved_edge_attributes or None,
+        }
+        used = [name for name, value in seams.items() if value is not None]
+        if used:
+            raise ValueError(
+                'The fork seams are not supported with concurrent ingestion (menhir fork): '
+                + ', '.join(used)
+            )
+
+    def _get_concurrent_ingestor(self) -> 'ConcurrentIngestor':
+        ingestor = getattr(self, '_concurrent_ingestor', None)
+        if ingestor is None:
+            from graphiti_core.ingestion.scheduler import ConcurrentIngestor
+
+            assert self.concurrent_ingestion is not None
+            ingestor = ConcurrentIngestor(self, self.concurrent_ingestion)
+            self._concurrent_ingestor = ingestor
+        return ingestor
 
     async def _get_or_create_saga(
         self,
@@ -669,6 +756,23 @@ class Graphiti:
         SagaNode
             The existing or newly created saga node.
         """
+        driver = driver or self.driver
+
+        existing = await self._find_saga(saga_name, group_id, driver=driver)
+        if existing is not None:
+            return existing
+
+        saga = SagaNode(name=saga_name, group_id=group_id, created_at=created_at)
+        await saga.save(driver)
+        return saga
+
+    async def _find_saga(
+        self,
+        saga_name: str,
+        group_id: str,
+        driver: GraphDriver | None = None,
+    ) -> SagaNode | None:
+        """Return the saga with the name, or None. The method writes nothing."""
         from graphiti_core.helpers import parse_db_date
 
         driver = driver or self.driver
@@ -695,27 +799,35 @@ class Graphiti:
                 last_episode_uuid=record['last_episode_uuid'],
             )
 
-        saga = SagaNode(name=saga_name, group_id=group_id, created_at=created_at)
-        await saga.save(driver)
-        return saga
+        return None
 
     async def _saga_get_previous_episode_uuid(
-        self, saga_uuid: str, current_episode_uuid: str, driver: GraphDriver | None = None
+        self,
+        saga_uuid: str,
+        current_episode_uuid: str,
+        group_id: str,
+        driver: GraphDriver | None = None,
     ) -> str | None:
         """Find the most recent episode UUID in a saga, excluding the current one."""
         driver = driver or self.driver
 
         if driver.graph_operations_interface:
             try:
-                return await driver.graph_operations_interface.saga_get_previous_episode_uuid(
-                    driver, saga_uuid, current_episode_uuid
+                previous_episode_uuid = (
+                    await driver.graph_operations_interface.saga_get_previous_episode_uuid(
+                        driver, saga_uuid, current_episode_uuid
+                    )
                 )
+                if previous_episode_uuid is not None:
+                    await EpisodicNode.get_by_uuid(driver, previous_episode_uuid, group_id=group_id)
+                return previous_episode_uuid
             except NotImplementedError:
                 pass
 
         records, _, _ = await driver.execute_query(
             """
-            MATCH (s:Saga {uuid: $saga_uuid})-[:HAS_EPISODE]->(e:Episodic)
+            MATCH (s:Saga {uuid: $saga_uuid, group_id: $group_id})
+                  -[:HAS_EPISODE]->(e:Episodic {group_id: $group_id})
             WHERE e.uuid <> $current_episode_uuid
             RETURN e.uuid AS uuid
             ORDER BY e.valid_at DESC, e.created_at DESC
@@ -723,6 +835,7 @@ class Graphiti:
             """,
             saga_uuid=saga_uuid,
             current_episode_uuid=current_episode_uuid,
+            group_id=group_id,
             routing_='r',
         )
         if records:
@@ -734,12 +847,14 @@ class Graphiti:
         saga_uuid: str,
         since: datetime | None = None,
         limit: int = 200,
+        driver: GraphDriver | None = None,
     ) -> list[tuple[str, datetime | None, datetime]] | None:
         """Retrieve (content, valid_at, created_at) episodes, using IoC if available."""
-        if self.driver.graph_operations_interface:
+        driver = driver or self.driver
+        if driver.graph_operations_interface:
             try:
-                return await self.driver.graph_operations_interface.saga_get_episode_contents(
-                    self.driver, saga_uuid, since=since, limit=limit
+                return await driver.graph_operations_interface.saga_get_episode_contents(
+                    driver, saga_uuid, since=since, limit=limit
                 )
             except NotImplementedError:
                 pass
@@ -748,6 +863,7 @@ class Graphiti:
     async def summarize_saga(
         self,
         saga_id: str,
+        group_id: str | None = None,
     ) -> SagaNode:
         """Incrementally summarize a saga using only new episodes since the last summary.
 
@@ -775,6 +891,9 @@ class Graphiti:
         ----------
         saga_id : str
             The UUID of the saga to summarize.
+        group_id : str | None
+            If set, the saga must belong to this group or NodeNotFoundError is raised.
+            If None, the lookup does not check the group.
 
         Returns
         -------
@@ -784,9 +903,16 @@ class Graphiti:
         Raises
         ------
         NodeNotFoundError
-            If the saga with the given UUID does not exist.
+            If the saga is not found in the selected group.
         """
-        saga = await SagaNode.get_by_uuid(self.driver, saga_id)
+        driver = self.driver
+        saga_clients = getattr(self, 'clients', None)
+        if group_id is not None:
+            group_id, driver, saga_clients = self._resolve_request_scope(group_id)
+
+        saga = await SagaNode.get_by_uuid(driver, saga_id)
+        if group_id is not None and saga.group_id != group_id:
+            raise NodeNotFoundError(saga_id)
 
         # Fetch only episodes added since the last summary. Cap the window to the same episode
         # count node summaries use so a long thread or document cannot fill
@@ -798,14 +924,14 @@ class Graphiti:
 
         # Try IoC interface first, fall back to raw Cypher
         episodes_data = await self._saga_get_episode_contents(
-            saga_id, since=since, limit=max_episodes
+            saga_id, since=since, limit=max_episodes, driver=driver
         )
         if episodes_data is None:
             if since is not None:
-                records, _, _ = await self.driver.execute_query(
+                records, _, _ = await driver.execute_query(
                     """
                     MATCH (s:Saga {uuid: $saga_uuid})-[:HAS_EPISODE]->(e:Episodic)
-                    WHERE e.created_at IS NOT NULL AND e.created_at > $since
+                    WHERE e.group_id = s.group_id AND e.created_at IS NOT NULL AND e.created_at > $since
                     RETURN e.content AS content, e.valid_at AS valid_at, e.created_at AS created_at
                     ORDER BY e.created_at ASC, e.valid_at ASC
                     LIMIT $limit
@@ -816,10 +942,10 @@ class Graphiti:
                     routing_='r',
                 )
             else:
-                records, _, _ = await self.driver.execute_query(
+                records, _, _ = await driver.execute_query(
                     """
                     MATCH (s:Saga {uuid: $saga_uuid})-[:HAS_EPISODE]->(e:Episodic)
-                    WHERE e.created_at IS NOT NULL
+                    WHERE e.group_id = s.group_id AND e.created_at IS NOT NULL
                     RETURN e.content AS content, e.valid_at AS valid_at, e.created_at AS created_at
                     ORDER BY e.created_at ASC, e.valid_at ASC
                     LIMIT $limit
@@ -885,7 +1011,6 @@ class Graphiti:
         schema_reserve = len(_SAGA_SUMMARY_SCHEMA_WRAPPER.encode('utf-8')) + len(
             json.dumps(SagaSummary.model_json_schema()).encode('utf-8')
         )
-        saga_clients = getattr(self, 'clients', None)
         while episodes_data:
             context = _prompt_context(episodes_data)
             prompt_bytes = (
@@ -954,7 +1079,7 @@ class Graphiti:
                 or new_episode_watermark > saga.last_summarized_episode_valid_at
             ):
                 saga.last_summarized_episode_valid_at = new_episode_watermark
-        await saga.save(self.driver)
+        await saga.save(driver)
 
         logger.info(f'Updated summary for saga {saga_id}')
 
@@ -1077,6 +1202,7 @@ class Graphiti:
         previous_episodes: list[EpisodicNode],
         entity_types: dict[str, type[BaseModel]] | None,
         excluded_entity_types: list[str] | None,
+        identity_properties: dict[str, list[str]] | None = None,
     ) -> tuple[
         list[EntityNode], dict[str, str], list[tuple[EntityNode, EntityNode]], dict[str, list[int]]
     ]:
@@ -1088,6 +1214,24 @@ class Graphiti:
             self.clients, episode, previous_episodes, entity_types, excluded_entity_types
         )
 
+        if identity_properties:
+            identity_nodes = [
+                node
+                for node in extracted_nodes
+                if _identity_type_for_node(node, identity_properties) is not None
+            ]
+        else:
+            identity_nodes = []
+        if identity_nodes:
+            await extract_attributes_only_from_nodes(
+                self.clients,
+                identity_nodes,
+                episode,
+                previous_episodes,
+                entity_types,
+                validate_shape=False,
+            )
+
         # Hook kwargs are forwarded ONLY when the corresponding hook is configured,
         # so the no-hook path keeps the legacy resolver signature exactly (compatibility).
         identity_kwargs: dict[str, Any] = {}
@@ -1097,6 +1241,8 @@ class Graphiti:
             identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
         if self.node_pre_resolution_hook is not None:
             identity_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
+        if identity_properties:
+            identity_kwargs['identity_properties'] = identity_properties
 
         nodes, uuid_map, duplicates = await resolve_extracted_nodes(
             self.clients,
@@ -1117,7 +1263,9 @@ class Graphiti:
         entity_types: dict[str, type[BaseModel]] | None,
         nodes: list[EntityNode],
         uuid_map: dict[str, str],
+        identity_properties: dict[str, list[str]] | None = None,
         clients: GraphitiClients | None = None,
+        trace: 'ResolutionTrace | None' = None,
     ) -> None:
         """Fold endpoints materialized by ``extract_edges`` into the resolved node set.
 
@@ -1128,6 +1276,8 @@ class Graphiti:
         ``resolve_extracted_nodes``. ``nodes`` and ``uuid_map`` are updated in place.
         """
         clients = clients or self.clients
+        # Pass `trace` only when it is set, so the serial path makes the calls of today.
+        trace_kwargs: dict[str, Any] = {'trace': trace} if trace is not None else {}
         nodes_by_name = {_normalize_string_exact(node.name): node for node in nodes}
         known_uuids = {node.uuid for node in nodes}
 
@@ -1155,6 +1305,8 @@ class Graphiti:
             identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
         if self.node_pre_resolution_hook is not None:
             identity_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
+        if identity_properties:
+            identity_kwargs['identity_properties'] = identity_properties
         resolved_nodes, materialized_uuid_map, _ = await resolve_extracted_nodes(
             clients,
             unresolved,
@@ -1162,6 +1314,7 @@ class Graphiti:
             previous_episodes,
             entity_types,
             **identity_kwargs,
+            **trace_kwargs,
         )
         uuid_map.update(materialized_uuid_map)
 
@@ -1185,7 +1338,9 @@ class Graphiti:
         custom_extraction_instructions: str | None = None,
         entity_types: dict[str, type[BaseModel]] | None = None,
         precomputed_edges: list[EntityEdge] | None = None,
+        identity_properties: dict[str, list[str]] | None = None,
         clients: GraphitiClients | None = None,
+        trace: 'ResolutionTrace | None' = None,
     ) -> tuple[list[EntityEdge], list[EntityEdge], list[EntityEdge]]:
         """Extract edges from episode(s) and resolve against the existing graph.
 
@@ -1211,6 +1366,7 @@ class Graphiti:
             - new_edges: Only edges that are new to the graph (not duplicates)
         """
         clients = clients or self.clients
+        trace_kwargs: dict[str, Any] = {'trace': trace} if trace is not None else {}
         episodes = episode if isinstance(episode, list) else [episode]
         primary_episode = episodes[0]
 
@@ -1243,7 +1399,9 @@ class Graphiti:
                 entity_types,
                 nodes,
                 uuid_map,
+                identity_properties=identity_properties,
                 clients=clients,
+                trace=trace,
             )
 
         edges = resolve_edge_pointers(extracted_edges, uuid_map)
@@ -1258,6 +1416,7 @@ class Graphiti:
             **edge_expiry_kwargs(self.edge_expiry_hook),
             **edge_invalidation_kwargs(self.edge_invalidation_hook),
             **preserved_attributes_kwargs(self.preserved_edge_attributes),
+            **trace_kwargs,
         )
 
         return resolved_edges, invalidated_edges, new_edges
@@ -1335,6 +1494,8 @@ class Graphiti:
 
         # Handle saga association if provided
         if saga is not None:
+            await _validate_saga_scope(saga, group_id, driver)
+
             # Get or create saga node based on input type
             if isinstance(saga, str):
                 # Use the originating episode's reference time (valid_at) for a
@@ -1351,7 +1512,7 @@ class Graphiti:
             previous_episode_uuid: str | None = saga_previous_episode_uuid
             if previous_episode_uuid is None:
                 previous_episode_uuid = await self._saga_get_previous_episode_uuid(
-                    saga_node.uuid, primary_episode.uuid, driver=driver
+                    saga_node.uuid, primary_episode.uuid, group_id, driver=driver
                 )
 
             # Create NEXT_EPISODE edge from the previous episode to the new one
@@ -1391,7 +1552,9 @@ class Graphiti:
         strict_edge_types: bool = False,
         custom_extraction_instructions: str | None = None,
         use_combined_extraction: bool = True,
+        identity_properties: dict[str, list[str]] | None = None,
         clients: GraphitiClients | None = None,
+        trace: 'ResolutionTrace | None' = None,
     ) -> tuple[
         dict[str, list[EntityNode]],
         dict[str, str],
@@ -1412,6 +1575,31 @@ class Graphiti:
             use_combined_extraction=use_combined_extraction,
         )
 
+        if identity_properties:
+            extraction_calls = []
+            for index, (episode, previous_episodes) in enumerate(episode_context):
+                identity_nodes = [
+                    node
+                    for node in extracted_nodes_bulk[index]
+                    if _identity_type_for_node(node, identity_properties) is not None
+                ]
+                if identity_nodes:
+                    extraction_calls.append(
+                        extract_attributes_only_from_nodes(
+                            clients,
+                            identity_nodes,
+                            episode,
+                            previous_episodes,
+                            entity_types,
+                            validate_shape=False,
+                        )
+                    )
+            if extraction_calls:
+                await semaphore_gather(
+                    *extraction_calls,
+                    max_coroutines=self.max_coroutines,
+                )
+
         # Dedupe extracted nodes in memory. Hook kwargs are forwarded only when
         # the corresponding hook is configured, preserving the legacy dedupe
         # signature otherwise.
@@ -1424,8 +1612,15 @@ class Graphiti:
         if self.node_pre_resolution_hook is not None:
             dedupe_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
             dedupe_kwargs['node_pre_resolution_edges'] = extracted_edges_bulk
+        trace_kwargs: dict[str, Any] = {'trace': trace} if trace is not None else {}
         nodes_by_episode, uuid_map = await dedupe_nodes_bulk(
-            clients, extracted_nodes_bulk, episode_context, entity_types, **dedupe_kwargs
+            clients,
+            extracted_nodes_bulk,
+            episode_context,
+            entity_types,
+            identity_properties=identity_properties,
+            **dedupe_kwargs,
+            **trace_kwargs,
         )
 
         return nodes_by_episode, uuid_map, extracted_edges_bulk
@@ -1439,10 +1634,17 @@ class Graphiti:
         edge_types: dict[str, type[BaseModel]] | None,
         edge_type_map: dict[tuple[str, str], list[str]],
         episodes: list[EpisodicNode],
+        identity_properties: dict[str, list[str]] | None = None,
         clients: GraphitiClients | None = None,
+        hydrate: bool = True,
+        trace: 'ResolutionTrace | None' = None,
     ) -> tuple[list[EntityNode], list[EntityEdge], list[EntityEdge], dict[str, str]]:
-        """Resolve nodes and edges against the existing graph."""
+        """Resolve nodes and edges against the existing graph.
+
+        With ``hydrate=False``, the method does not extract node attributes and summaries.
+        """
         clients = clients or self.clients
+        trace_kwargs: dict[str, Any] = {'trace': trace} if trace is not None else {}
         nodes_by_uuid: dict[str, EntityNode] = {
             node.uuid: node for nodes in nodes_by_episode.values() for node in nodes
         }
@@ -1473,16 +1675,35 @@ class Graphiti:
             return kwargs
 
         # Resolve nodes
-        node_results = await semaphore_gather(
-            *[
-                resolve_extracted_nodes(
+        async def resolve_nodes(
+            episode: EpisodicNode,
+            previous_episodes: list[EpisodicNode],
+        ):
+            nodes = nodes_by_episode_unique[episode.uuid]
+            if identity_properties:
+                return await resolve_extracted_nodes(
                     clients,
-                    nodes_by_episode_unique[episode.uuid],
+                    nodes,
                     episode,
                     previous_episodes,
                     entity_types,
+                    identity_properties=identity_properties,
                     **_identity_kwargs(edges_by_episode.get(episode.uuid)),
+                    **trace_kwargs,
                 )
+            return await resolve_extracted_nodes(
+                clients,
+                nodes,
+                episode,
+                previous_episodes,
+                entity_types,
+                **_identity_kwargs(edges_by_episode.get(episode.uuid)),
+                **trace_kwargs,
+            )
+
+        node_results = await semaphore_gather(
+            *[
+                resolve_nodes(episode, previous_episodes)
                 for episode, previous_episodes in episode_context
             ],
             max_coroutines=self.max_coroutines,
@@ -1507,9 +1728,46 @@ class Graphiti:
                 updated_nodes.append(updated_node)
             nodes_by_episode_unique[episode_uuid] = updated_nodes
 
+        if identity_properties:
+            episodes_by_uuid = {episode.uuid: episode for episode, _ in episode_context}
+            episode_context_indices = {
+                episode.uuid: index for index, (episode, _) in enumerate(episode_context)
+            }
+            previous_episodes_by_uuid = {
+                episode.uuid: previous_episodes for episode, previous_episodes in episode_context
+            }
+            mentioning_episodes_by_node_uuid: dict[str, list[EpisodicNode]] = {}
+            for episode, _ in episode_context:
+                episode_node_uuids: set[str] = set()
+                for node in nodes_by_episode[episode.uuid]:
+                    node_uuid = uuid_map.get(node.uuid, node.uuid)
+                    if node_uuid in episode_node_uuids:
+                        continue
+                    episode_node_uuids.add(node_uuid)
+                    mentioning_episodes_by_node_uuid.setdefault(node_uuid, []).append(episode)
+
+            identity_nodes_by_episode_uuids: dict[tuple[str, ...], list[EntityNode]] = {}
+            multi_mention_identity_node_uuids: set[str] = set()
+            for node_uuid, mentioning_episodes in mentioning_episodes_by_node_uuid.items():
+                node = nodes_by_uuid[node_uuid]
+                if (
+                    len(mentioning_episodes) > 1
+                    and _identity_type_for_node(node, identity_properties) is not None
+                ):
+                    episode_uuids = tuple(episode.uuid for episode in mentioning_episodes)
+                    identity_nodes_by_episode_uuids.setdefault(episode_uuids, []).append(node)
+                    multi_mention_identity_node_uuids.add(node_uuid)
+
+            if multi_mention_identity_node_uuids:
+                for episode_uuid, nodes in nodes_by_episode_unique.items():
+                    nodes_by_episode_unique[episode_uuid] = [
+                        node for node in nodes if node.uuid not in multi_mention_identity_node_uuids
+                    ]
+
         # Extract attributes for resolved nodes
-        hydrated_nodes_results: list[list[EntityNode]] = await semaphore_gather(
-            *[
+        hydrated_nodes_results: list[list[EntityNode]]
+        if hydrate:
+            episode_hydration_calls = [
                 extract_attributes_from_nodes(
                     clients,
                     nodes_by_episode_unique[episode.uuid],
@@ -1518,11 +1776,57 @@ class Graphiti:
                     entity_types,
                 )
                 for episode, previous_episodes in episode_context
-            ],
-            max_coroutines=self.max_coroutines,
-        )
+            ]
+            if identity_properties:
+                episodes_by_uuid = {episode.uuid: episode for episode, _ in episode_context}
+                episode_context_indices = {
+                    episode.uuid: index for index, (episode, _) in enumerate(episode_context)
+                }
+                previous_episodes_by_uuid = {
+                    episode.uuid: previous_episodes
+                    for episode, previous_episodes in episode_context
+                }
+                identity_hydration_calls = []
+                for episode_uuids, nodes in identity_nodes_by_episode_uuids.items():
+                    mentioning_episodes = sorted(
+                        (episodes_by_uuid[episode_uuid] for episode_uuid in episode_uuids),
+                        key=lambda episode: (
+                            ensure_utc(episode.valid_at),
+                            episode_context_indices[episode.uuid],
+                        ),
+                    )
+                    identity_hydration_calls.append(
+                        extract_attributes_from_nodes(
+                            clients,
+                            nodes,
+                            mentioning_episodes,
+                            previous_episodes_by_uuid[mentioning_episodes[0].uuid],
+                            entity_types,
+                        )
+                    )
+                hydrated_nodes_results = await semaphore_gather(
+                    *episode_hydration_calls,
+                    *identity_hydration_calls,
+                    max_coroutines=self.max_coroutines,
+                )
+            else:
+                hydrated_nodes_results = await semaphore_gather(
+                    *episode_hydration_calls,
+                    max_coroutines=self.max_coroutines,
+                )
+        else:
+            hydrated_nodes_results = [
+                nodes_by_episode_unique[episode.uuid] for episode, _ in episode_context
+            ]
+            if identity_properties:
+                hydrated_nodes_results.extend(identity_nodes_by_episode_uuids.values())
 
         final_hydrated_nodes = [node for nodes in hydrated_nodes_results for node in nodes]
+        if identity_properties:
+            unique_hydrated_nodes: dict[str, EntityNode] = {}
+            for node in final_hydrated_nodes:
+                unique_hydrated_nodes.setdefault(node.uuid, node)
+            final_hydrated_nodes = list(unique_hydrated_nodes.values())
 
         # Resolve edges with updated pointers
         edges_by_episode_unique: dict[str, list[EntityEdge]] = {}
@@ -1548,6 +1852,7 @@ class Graphiti:
                     **edge_expiry_kwargs(self.edge_expiry_hook),
                     **edge_invalidation_kwargs(self.edge_invalidation_hook),
                     **preserved_attributes_kwargs(self.preserved_edge_attributes),
+                    **trace_kwargs,
                 )
                 for episode in episodes
             ],
@@ -1671,6 +1976,7 @@ class Graphiti:
         saga_previous_episode_uuid: str | None = None,
         new_episode_uuid: str | None = None,
         publish_fence: PublishFence | None = None,
+        identity_properties: dict[str, list[str]] | None = None,
     ) -> AddEpisodeResults:
         """
         Process an episode and update the graph.
@@ -1726,6 +2032,9 @@ class Graphiti:
             graph writes (see :mod:`graphiti_core.publish_fence`). Raising rolls the whole
             episode back. Incompatible with ``saga`` and ``update_communities``, which write
             outside the transaction (ValueError).
+        identity_properties : dict[str, list[str]] | None
+            Optional. Map entity type names to attribute names that identify entities.
+            Graphiti extracts these attributes before node resolution.
 
         Returns
         -------
@@ -1767,12 +2076,53 @@ class Graphiti:
         now = utc_now()
 
         validate_entity_types(entity_types)
+        validate_identity_properties(identity_properties, entity_types)
         validate_excluded_entity_types(excluded_entity_types, entity_types)
 
         # Resolve a request-scoped driver/clients bundle rather than mutating the
         # shared ``self.driver``, so concurrent calls for different group_ids cannot
         # clobber each other's database target mid-execution (issue #1676).
         group_id, driver, clients = self._resolve_request_scope(group_id)
+
+        await _validate_saga_scope(saga, group_id, driver)
+        if saga is not None and saga_previous_episode_uuid is not None:
+            await EpisodicNode.get_by_uuid(driver, saga_previous_episode_uuid, group_id=group_id)
+
+        if self._concurrent_ingestion_enabled(group_id):
+            # Fork seams are not supported with concurrent ingestion (fail-closed guard).
+            self._reject_fork_seams_for_concurrent_ingestion(new_episode_uuid, publish_fence)
+            if update_communities:
+                raise ValueError(
+                    'update_communities=True has no support in concurrent ingestion. '
+                    'Call build_communities after the ingestion.'
+                )
+            if uuid is not None:
+                await EpisodicNode.get_by_uuid(driver, uuid, group_id=group_id)
+            if previous_episode_uuids is not None:
+                await EpisodicNode.get_by_uuids(
+                    driver,
+                    previous_episode_uuids,
+                    group_id=group_id,
+                    require_all=True,
+                )
+            return await self._get_concurrent_ingestor().add_episode(
+                name=name,
+                episode_body=episode_body,
+                source_description=source_description,
+                reference_time=reference_time,
+                source=source,
+                group_id=group_id,
+                uuid=uuid,
+                entity_types=entity_types,
+                excluded_entity_types=excluded_entity_types,
+                previous_episode_uuids=previous_episode_uuids,
+                edge_types=edge_types,
+                edge_type_map=edge_type_map,
+                custom_extraction_instructions=custom_extraction_instructions,
+                saga=saga,
+                saga_previous_episode_uuid=saga_previous_episode_uuid,
+                identity_properties=identity_properties,
+            )
 
         with self.tracer.start_span('add_episode') as span:
             try:
@@ -1786,7 +2136,12 @@ class Graphiti:
                         driver=driver,
                     )
                     if previous_episode_uuids is None
-                    else await EpisodicNode.get_by_uuids(driver, previous_episode_uuids)
+                    else await EpisodicNode.get_by_uuids(
+                        driver,
+                        previous_episode_uuids,
+                        group_id=group_id,
+                        require_all=True,
+                    )
                 )
                 # The context episodes actually used (the parameter above is only the caller's
                 # request), reported to the publish fence.
@@ -1794,7 +2149,7 @@ class Graphiti:
 
                 # Get or create episode
                 if uuid is not None:
-                    episode = await EpisodicNode.get_by_uuid(driver, uuid)
+                    episode = await EpisodicNode.get_by_uuid(driver, uuid, group_id=group_id)
                 else:
                     episode = EpisodicNode(
                         name=name,
@@ -1837,8 +2192,7 @@ class Graphiti:
                 )
 
                 # Hook kwargs are forwarded only when the corresponding hook is
-                # configured, so the no-hook path keeps the legacy resolver
-                # signature exactly.
+                # configured; identity_properties is always passed, as upstream does.
                 identity_kwargs: dict[str, Any] = {}
                 if self.identity_gate_hook is not None:
                     identity_kwargs['identity_gate_hook'] = self.identity_gate_hook
@@ -1848,6 +2202,26 @@ class Graphiti:
                 if self.node_pre_resolution_hook is not None:
                     identity_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
                     identity_kwargs['node_pre_resolution_edges'] = precomputed_edges
+                identity_kwargs['identity_properties'] = identity_properties
+
+                if identity_properties:
+                    identity_nodes = [
+                        node
+                        for node in extracted_nodes
+                        if _identity_type_for_node(node, identity_properties) is not None
+                    ]
+                else:
+                    identity_nodes = []
+                if identity_nodes:
+                    await extract_attributes_only_from_nodes(
+                        clients,
+                        identity_nodes,
+                        episode,
+                        previous_episodes,
+                        entity_types,
+                        validate_shape=False,
+                    )
+
                 nodes, uuid_map, _ = await resolve_extracted_nodes(
                     clients,
                     extracted_nodes,
@@ -1876,6 +2250,7 @@ class Graphiti:
                     custom_extraction_instructions=custom_extraction_instructions,
                     entity_types=entity_types,
                     precomputed_edges=precomputed_edges,
+                    identity_properties=identity_properties,
                     clients=clients,
                 )
 
@@ -1983,6 +2358,7 @@ class Graphiti:
         custom_extraction_instructions: str | None = None,
         saga: str | SagaNode | None = None,
         use_combined_extraction: bool = True,
+        identity_properties: dict[str, list[str]] | None = None,
     ) -> AddBulkEpisodeResults:
         """
         Process multiple episodes in bulk and update the graph.
@@ -2019,6 +2395,9 @@ class Graphiti:
         use_combined_extraction : bool
             If True, use one combined node-and-edge LLM call per episode. If False, use separate
             node and edge extraction.
+        identity_properties : dict[str, list[str]] | None
+            Optional. Map entity type names to attribute names that identify entities.
+            Graphiti extracts these attributes before node resolution.
 
         Returns
         -------
@@ -2044,17 +2423,52 @@ class Graphiti:
         ``resolve_extracted_edges`` just like in ``add_episode``, and any invalidated
         edges are persisted alongside the newly resolved ones.
         """
+        if getattr(self, 'concurrent_ingestion', None) is not None:
+            concurrent_group_id, concurrent_driver, _ = self._resolve_request_scope(group_id)
+            if self._concurrent_ingestion_enabled(concurrent_group_id):
+                # Fork seams are not supported with concurrent ingestion (fail-closed guard).
+                self._reject_fork_seams_for_concurrent_ingestion()
+                await _validate_saga_scope(saga, concurrent_group_id, concurrent_driver)
+                validate_entity_types(entity_types)
+                validate_identity_properties(identity_properties, entity_types)
+                episode_uuids = [
+                    episode.uuid for episode in bulk_episodes if episode.uuid is not None
+                ]
+                if episode_uuids:
+                    await EpisodicNode.get_by_uuids(
+                        concurrent_driver,
+                        episode_uuids,
+                        group_id=concurrent_group_id,
+                        require_all=True,
+                    )
+                return await self._get_concurrent_ingestor().add_episode_bulk(
+                    bulk_episodes=bulk_episodes,
+                    group_id=concurrent_group_id,
+                    entity_types=entity_types,
+                    excluded_entity_types=excluded_entity_types,
+                    edge_types=edge_types,
+                    edge_type_map=edge_type_map,
+                    strict_edge_types=strict_edge_types,
+                    custom_extraction_instructions=custom_extraction_instructions,
+                    saga=saga,
+                    use_combined_extraction=use_combined_extraction,
+                    identity_properties=identity_properties,
+                )
+
         with self.tracer.start_span('add_episode_bulk') as bulk_span:
             bulk_span.add_attributes({'episode.count': len(bulk_episodes)})
 
             try:
                 start = time()
                 now = utc_now()
+                validate_entity_types(entity_types)
+                validate_identity_properties(identity_properties, entity_types)
 
                 # Resolve a request-scoped driver/clients bundle rather than mutating
                 # the shared ``self.driver``, so concurrent calls for different
                 # group_ids cannot clobber each other's database target (issue #1676).
                 group_id, driver, clients = self._resolve_request_scope(group_id)
+                await _validate_saga_scope(saga, group_id, driver)
 
                 # Create default edge type map
                 edge_type_map_default = (
@@ -2064,7 +2478,7 @@ class Graphiti:
                 )
 
                 episodes = [
-                    await EpisodicNode.get_by_uuid(driver, episode.uuid)
+                    await EpisodicNode.get_by_uuid(driver, episode.uuid, group_id=group_id)
                     if episode.uuid is not None
                     else EpisodicNode(
                         name=episode.name,
@@ -2108,6 +2522,7 @@ class Graphiti:
                     strict_edge_types=strict_edge_types,
                     custom_extraction_instructions=custom_extraction_instructions,
                     use_combined_extraction=use_combined_extraction,
+                    identity_properties=identity_properties,
                     clients=clients,
                 )
 
@@ -2147,6 +2562,7 @@ class Graphiti:
                     edge_types,
                     edge_type_map or edge_type_map_default,
                     episodes,
+                    identity_properties=identity_properties,
                     clients=clients,
                 )
 
@@ -2191,7 +2607,7 @@ class Graphiti:
 
                     # Find the most recent episode already in the saga
                     previous_episode_uuid = await self._saga_get_previous_episode_uuid(
-                        saga_node.uuid, '', driver=driver
+                        saga_node.uuid, '', group_id, driver=driver
                     )
 
                     for episode in sorted_episodes:
@@ -2405,17 +2821,54 @@ class Graphiti:
             driver=driver,
         )
 
-    async def get_nodes_and_edges_by_episode(self, episode_uuids: list[str]) -> SearchResults:
-        episodes = await EpisodicNode.get_by_uuids(self.driver, episode_uuids)
+    async def get_nodes_and_edges_by_episode(
+        self, episode_uuids: list[str], group_id: str | None = None
+    ) -> SearchResults:
+        """Get nodes and edges that episodes reference.
+
+        Parameters
+        ----------
+        episode_uuids : list[str]
+            The episode UUIDs.
+        group_id : str | None
+            If set, episodes must belong to this group or NodeNotFoundError is raised. Only nodes
+            and edges in this group are returned. If None, the method does not check the group of
+            the episode UUIDs. Multi-tenant callers must pass group_id.
+
+        Raises
+        ------
+        NodeNotFoundError
+            If an episode is not found in the selected group.
+        """
+        driver = self.driver
+        if group_id is not None:
+            group_id, driver, _ = self._resolve_request_scope(group_id)
+
+        episodes = await EpisodicNode.get_by_uuids(
+            driver,
+            episode_uuids,
+            group_id=group_id,
+            require_all=group_id is not None,
+        )
 
         edges_list = await semaphore_gather(
-            *[EntityEdge.get_by_uuids(self.driver, episode.entity_edges) for episode in episodes],
+            *[
+                EntityEdge.get_by_uuids(driver, episode.entity_edges, group_id=group_id)
+                for episode in episodes
+            ],
             max_coroutines=self.max_coroutines,
         )
 
-        edges: list[EntityEdge] = [edge for lst in edges_list for edge in lst]
+        allowed_group_ids = {episode.group_id for episode in episodes}
+        edges: list[EntityEdge] = [
+            edge for lst in edges_list for edge in lst if edge.group_id in allowed_group_ids
+        ]
 
-        nodes = await get_mentioned_nodes(self.driver, episodes)
+        nodes = [
+            node
+            for node in await get_mentioned_nodes(driver, episodes)
+            if node.group_id in allowed_group_ids
+        ]
 
         return SearchResults(edges=edges, nodes=nodes)
 
@@ -2425,7 +2878,30 @@ class Graphiti:
         edge: EntityEdge,
         target_node: EntityNode,
         episode: EpisodicNode | None = None,
+        identity_properties: dict[str, list[str]] | None = None,
     ) -> AddTripletResults:
+        """Add a node-edge-node triplet and resolve nodes by configured identity properties.
+
+        Pass ``identity_properties`` to match caller-provided node attributes against
+        existing entities. The caller must supply these attributes on the nodes.
+        """
+        for value_name, value in (
+            ('source node', source_node),
+            ('target node', target_node),
+            ('episode', episode),
+        ):
+            if value is not None and value.group_id != edge.group_id:
+                raise ValueError(
+                    f'{value_name} {value.uuid} does not belong to group {edge.group_id}'
+                )
+        if edge.episodes:
+            await EpisodicNode.get_by_uuids(
+                self.driver,
+                edge.episodes,
+                group_id=edge.group_id,
+                require_all=True,
+            )
+
         if source_node.name_embedding is None:
             await source_node.generate_name_embedding(self.embedder)
         if target_node.name_embedding is None:
@@ -2443,6 +2919,8 @@ class Graphiti:
             identity_kwargs['candidate_filter_hook'] = self.candidate_filter_hook
         if self.node_pre_resolution_hook is not None:
             identity_kwargs['node_pre_resolution_hook'] = self.node_pre_resolution_hook
+        if identity_properties:
+            identity_kwargs['identity_properties'] = identity_properties
         try:
             resolved_source = await EntityNode.get_by_uuid(self.driver, source_node.uuid)
         except NodeNotFoundError:
@@ -2452,6 +2930,8 @@ class Graphiti:
                 **identity_kwargs,
             )
             resolved_source = resolved_source_nodes[0]
+        if resolved_source.group_id != edge.group_id:
+            raise NodeNotFoundError(source_node.uuid)
 
         try:
             resolved_target = await EntityNode.get_by_uuid(self.driver, target_node.uuid)
@@ -2462,6 +2942,8 @@ class Graphiti:
                 **identity_kwargs,
             )
             resolved_target = resolved_target_nodes[0]
+        if resolved_target.group_id != edge.group_id:
+            raise NodeNotFoundError(target_node.uuid)
 
         nodes = [resolved_source, resolved_target]
 
@@ -2490,7 +2972,14 @@ class Graphiti:
         # Check if an edge with this UUID already exists with different source/target nodes.
         # If so, generate a new UUID to create a new edge instead of overwriting.
         try:
+            # Keep this lookup unscoped so the group check catches a foreign edge before MERGE overwrites it.
             existing_edge = await EntityEdge.get_by_uuid(self.driver, edge.uuid)
+        except EdgeNotFoundError:
+            # Edge doesn't exist yet, proceed normally
+            pass
+        else:
+            if existing_edge.group_id != edge.group_id:
+                raise EdgeNotFoundError(edge.uuid)
             # Edge exists - check if source/target nodes match
             if (
                 existing_edge.source_node_uuid != edge.source_node_uuid
@@ -2503,38 +2992,36 @@ class Graphiti:
                     f'Edge UUID {old_uuid} already exists with different source/target nodes. '
                     f'Generated new UUID {edge.uuid} to avoid overwriting.'
                 )
-        except EdgeNotFoundError:
-            # Edge doesn't exist yet, proceed normally
-            pass
 
         # Duplicate candidates: a hybrid search pre-filtered to edges between
         # the pair's endpoints (either orientation) -- the backend ranks over
         # the pair's edges only, never a graph-wide scan. The post-filter
         # drops self-loops the {a,b}x{a,b} filter admits. Mirrors
         # resolve_extracted_edges.
-        related_edges = _same_pair_edges(
-            edge,
-            (
-                await search(
-                    self.clients,
-                    edge.fact,
-                    group_ids=[edge.group_id],
-                    config=EDGE_HYBRID_SEARCH_RRF,
-                    search_filter=_pair_search_filter(edge),
-                    query_vector=edge.fact_embedding,
-                )
-            ).edges,
+        related_search = await search(
+            self.clients,
+            edge.fact,
+            group_ids=[edge.group_id],
+            config=EDGE_HYBRID_SEARCH_RRF,
+            search_filter=_pair_search_filter(edge),
+            query_vector=edge.fact_embedding,
         )
-        existing_edges = (
-            await search(
-                self.clients,
-                edge.fact,
-                group_ids=[edge.group_id],
-                config=EDGE_HYBRID_SEARCH_RRF,
-                search_filter=SearchFilters(),
-                query_vector=edge.fact_embedding,
-            )
-        ).edges
+        related_edges = [
+            candidate
+            for candidate in _same_pair_edges(edge, related_search.edges)
+            if candidate.group_id == edge.group_id
+        ]
+        existing_search = await search(
+            self.clients,
+            edge.fact,
+            group_ids=[edge.group_id],
+            config=EDGE_HYBRID_SEARCH_RRF,
+            search_filter=SearchFilters(),
+            query_vector=edge.fact_embedding,
+        )
+        existing_edges = [
+            candidate for candidate in existing_search.edges if candidate.group_id == edge.group_id
+        ]
         # Keep edges that are already duplicate candidates out of the
         # invalidation list so the LLM is not shown the same fact under two
         # indices. Mirrors resolve_extracted_edges' overlap dedup.
@@ -2573,6 +3060,8 @@ class Graphiti:
         )
 
         edges: list[EntityEdge] = [resolved_edge] + invalidated_edges
+        if any(candidate.group_id != edge.group_id for candidate in edges):
+            raise ValueError('triplet resolution crossed the requested group boundary')
 
         await create_entity_edge_embeddings(self.embedder, edges)
         await create_entity_node_embeddings(self.embedder, nodes)
@@ -2580,12 +3069,40 @@ class Graphiti:
         await add_nodes_and_edges_bulk(self.driver, [], [], nodes, edges, self.embedder)
         return AddTripletResults(edges=edges, nodes=nodes)
 
-    async def remove_episode(self, episode_uuid: str):
+    async def remove_episode(self, episode_uuid: str, group_id: str | None = None):
+        """Remove an episode and its related nodes and edges.
+
+        Parameters
+        ----------
+        episode_uuid : str
+            The episode UUID.
+        group_id : str | None
+            If set, the episode must belong to this group or NodeNotFoundError is raised. Only nodes
+            and edges in this group are changed or deleted. If None, the method does not check the
+            group of the episode UUID. Multi-tenant callers must pass group_id.
+
+        Raises
+        ------
+        NodeNotFoundError
+            If the episode is not found in the selected group.
+        """
+        driver = self.driver
+        clients = self.clients
+        if group_id is not None:
+            group_id, driver, clients = self._resolve_request_scope(group_id)
+
         # Find the episode to be deleted
-        episode = await EpisodicNode.get_by_uuid(self.driver, episode_uuid)
+        episode = await EpisodicNode.get_by_uuid(driver, episode_uuid, group_id=group_id)
+        group_id = episode.group_id
 
         # Find edges mentioned by the episode
-        edges = await EntityEdge.get_by_uuids(self.driver, episode.entity_edges)
+        edges = [
+            edge
+            for edge in await EntityEdge.get_by_uuids(
+                driver, episode.entity_edges, group_id=group_id
+            )
+            if edge.group_id == group_id
+        ]
 
         # Keep edges that other episodes also support.
         edges_to_delete: list[EntityEdge] = []
@@ -2599,12 +3116,22 @@ class Graphiti:
                     edges_to_delete.append(edge)
 
         # Find nodes mentioned by the episode
-        nodes = await get_mentioned_nodes(self.driver, [episode])
+        nodes = [
+            node
+            for node in await get_mentioned_nodes(driver, [episode])
+            if node.group_id == group_id
+        ]
         # We should delete all nodes that are only mentioned in the deleted episode
         nodes_to_delete: list[EntityNode] = []
         for node in nodes:
-            query: LiteralString = 'MATCH (e:Episodic)-[:MENTIONS]->(n:Entity {uuid: $uuid}) RETURN count(*) AS episode_count'
-            records, _, _ = await self.driver.execute_query(query, uuid=node.uuid, routing_='r')
+            query: LiteralString = (
+                'MATCH (e:Episodic {group_id: $group_id})-[:MENTIONS]->'
+                '(n:Entity {uuid: $uuid, group_id: $group_id}) '
+                'RETURN count(*) AS episode_count'
+            )
+            records, _, _ = await driver.execute_query(
+                query, uuid=node.uuid, group_id=group_id, routing_='r'
+            )
 
             for record in records:
                 if record['episode_count'] == 1:
@@ -2614,19 +3141,23 @@ class Graphiti:
         surviving_nodes = [node for node in nodes if node.uuid not in deleted_node_uuids]
 
         for edge in edges_to_update:
-            await edge.load_fact_embedding(self.driver)
-            await edge.save(self.driver)
+            await edge.load_fact_embedding(driver)
+            await edge.save(driver)
 
-        await Edge.delete_by_uuids(self.driver, [edge.uuid for edge in edges_to_delete])
-        await Node.delete_by_uuids(self.driver, [node.uuid for node in nodes_to_delete])
-        await episode.delete(self.driver)
+        await Edge.delete_by_uuids(driver, [edge.uuid for edge in edges_to_delete])
+        await Node.delete_by_uuids(driver, [node.uuid for node in nodes_to_delete])
+        await episode.delete(driver)
 
         async def rebuild_node_summary(node: EntityNode) -> None:
             old_summary = node.summary
             try:
-                episodes = await EpisodicNode.get_by_entity_node_uuid(self.driver, node.uuid)
+                episodes = await EpisodicNode.get_by_entity_node_uuid(driver, node.uuid)
                 remaining_episodes = sorted(
-                    [remaining for remaining in episodes if remaining.uuid != episode.uuid],
+                    [
+                        remaining
+                        for remaining in episodes
+                        if remaining.uuid != episode.uuid and remaining.group_id == group_id
+                    ],
                     key=lambda remaining: remaining.valid_at or remaining.created_at,
                 )
                 node.summary = ''
@@ -2635,17 +3166,17 @@ class Graphiti:
                         batch_start : batch_start + SUMMARY_REBUILD_BATCH_SIZE
                     ]
                     await _extract_entity_summaries_batch(
-                        self.llm_client,
+                        clients.llm_client,
                         [node],
                         episode_batch,
                         None,
                         None,
                         {},
                         skip_fact_appending=True,
-                        clients=self.clients,
+                        clients=clients,
                     )
-                await node.load_name_embedding(self.driver)
-                await node.save(self.driver)
+                await node.load_name_embedding(driver)
+                await node.save(driver)
             except Exception:
                 node.summary = old_summary
                 logger.exception(

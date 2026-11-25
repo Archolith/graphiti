@@ -195,22 +195,6 @@ async def test_ops_save_bulk_reconciles_copies_of_one_edge(ops_cls, use_tx, orde
         assert row['episodes'] == ['ep-1', 'ep-2'] or row['episodes'] == ['ep-2', 'ep-1']
 
 
-# --- kuzu ops ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_kuzu_save_passes_reference_time() -> None:
-    try:
-        from graphiti_core.driver.kuzu.operations.entity_edge_ops import KuzuEntityEdgeOperations
-    except ImportError as exc:  # kuzu is not installable on every machine
-        pytest.skip(f'kuzu ops module not importable: {exc}')
-    executor = _executor()
-
-    await KuzuEntityEdgeOperations().save(executor, _edge())
-
-    assert executor.execute_query.call_args.kwargs['reference_time'] == REF
-
-
 # --- add_nodes_and_edges_bulk_tx --------------------------------------------------------
 
 

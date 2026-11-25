@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
@@ -34,7 +33,12 @@ from graphiti_core.driver.driver import (
 )
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.errors import NodeNotFoundError
-from graphiti_core.helpers import get_default_group_id, parse_db_date, validate_node_labels
+from graphiti_core.helpers import (
+    SAFE_CYPHER_IDENTIFIER_PATTERN,
+    get_default_group_id,
+    parse_db_date,
+    validate_node_labels,
+)
 from graphiti_core.models.nodes.node_db_queries import (
     COMMUNITY_NODE_RETURN,
     COMMUNITY_NODE_RETURN_NEPTUNE,
@@ -51,6 +55,8 @@ from graphiti_core.models.nodes.node_db_queries import (
 from graphiti_core.utils.datetime_utils import utc_now
 
 logger = logging.getLogger(__name__)
+
+NODE_DEDUP_CANDIDATE_LIMIT = 15
 
 
 class EpisodeType(Enum):
@@ -131,31 +137,6 @@ class Node(BaseModel, ABC):
                     uuid=self.uuid,
                 )
 
-            case GraphProvider.KUZU:
-                for label in ['Episodic', 'Community']:
-                    await driver.execute_query(
-                        f"""
-                        MATCH (n:{label} {{uuid: $uuid}})
-                        DETACH DELETE n
-                        """,
-                        uuid=self.uuid,
-                    )
-                # Entity edges are actually nodes in Kuzu, so simple `DETACH DELETE` will not work.
-                # Explicitly delete the "edge" nodes first, then the entity node.
-                await driver.execute_query(
-                    """
-                    MATCH (n:Entity {uuid: $uuid})-[:RELATES_TO]->(e:RelatesToNode_)
-                    DETACH DELETE e
-                    """,
-                    uuid=self.uuid,
-                )
-                await driver.execute_query(
-                    """
-                    MATCH (n:Entity {uuid: $uuid})
-                    DETACH DELETE n
-                    """,
-                    uuid=self.uuid,
-                )
             case _:  # FalkorDB, Neptune
                 for label in ['Entity', 'Episodic', 'Community']:
                     await driver.execute_query(
@@ -200,31 +181,6 @@ class Node(BaseModel, ABC):
                         batch_size=batch_size,
                     )
 
-            case GraphProvider.KUZU:
-                for label in ['Episodic', 'Community']:
-                    await driver.execute_query(
-                        f"""
-                        MATCH (n:{label} {{group_id: $group_id}})
-                        DETACH DELETE n
-                        """,
-                        group_id=group_id,
-                    )
-                # Entity edges are actually nodes in Kuzu, so simple `DETACH DELETE` will not work.
-                # Explicitly delete the "edge" nodes first, then the entity node.
-                await driver.execute_query(
-                    """
-                    MATCH (n:Entity {group_id: $group_id})-[:RELATES_TO]->(e:RelatesToNode_)
-                    DETACH DELETE e
-                    """,
-                    group_id=group_id,
-                )
-                await driver.execute_query(
-                    """
-                    MATCH (n:Entity {group_id: $group_id})
-                    DETACH DELETE n
-                    """,
-                    group_id=group_id,
-                )
             case _:  # FalkorDB, Neptune
                 for label in ['Entity', 'Episodic', 'Community']:
                     await driver.execute_query(
@@ -256,34 +212,6 @@ class Node(BaseModel, ABC):
                         """,
                         uuids=uuids,
                     )
-            case GraphProvider.KUZU:
-                for label in ['Episodic', 'Community']:
-                    await driver.execute_query(
-                        f"""
-                        MATCH (n:{label})
-                        WHERE n.uuid IN $uuids
-                        DETACH DELETE n
-                        """,
-                        uuids=uuids,
-                    )
-                # Entity edges are actually nodes in Kuzu, so simple `DETACH DELETE` will not work.
-                # Explicitly delete the "edge" nodes first, then the entity node.
-                await driver.execute_query(
-                    """
-                    MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)
-                    WHERE n.uuid IN $uuids
-                    DETACH DELETE e
-                    """,
-                    uuids=uuids,
-                )
-                await driver.execute_query(
-                    """
-                    MATCH (n:Entity)
-                    WHERE n.uuid IN $uuids
-                    DETACH DELETE n
-                    """,
-                    uuids=uuids,
-                )
             case _:  # Neo4J, Neptune
                 async with driver.session() as session:
                     # Collect all edge UUIDs before deleting nodes
@@ -361,18 +289,44 @@ class EpisodicNode(Node):
         return result
 
     @classmethod
-    async def get_by_uuid(cls, driver: GraphDriver, uuid: str):
+    async def get_by_uuid(cls, driver: GraphDriver, uuid: str, group_id: str | None = None):
+        """Get an episode by UUID.
+
+        Parameters
+        ----------
+        driver : GraphDriver
+            The graph driver.
+        uuid : str
+            The episode UUID.
+        group_id : str | None
+            If set, the episode must belong to this group or NodeNotFoundError is raised.
+            If None, the lookup does not check the group.
+
+        Raises
+        ------
+        NodeNotFoundError
+            If the episode is not found in the selected group.
+        """
         if driver.graph_operations_interface:
             try:
-                return await driver.graph_operations_interface.episodic_node_get_by_uuid(
+                episode = await driver.graph_operations_interface.episodic_node_get_by_uuid(
                     cls, driver, uuid
                 )
             except NotImplementedError:
                 pass
+            else:
+                if group_id is not None and episode.group_id != group_id:
+                    raise NodeNotFoundError(uuid)
+                return episode
+
+        group_filter: LiteralString = 'WHERE e.group_id = $group_id' if group_id is not None else ''
 
         records, _, _ = await driver.execute_query(
             """
             MATCH (e:Episodic {uuid: $uuid})
+            """
+            + group_filter
+            + """
             RETURN
             """
             + (
@@ -381,10 +335,13 @@ class EpisodicNode(Node):
                 else EPISODIC_NODE_RETURN
             ),
             uuid=uuid,
+            group_id=group_id,
             routing_='r',
         )
 
         episodes = [get_episodic_node_from_record(record) for record in records]
+        if group_id is not None:
+            episodes = [episode for episode in episodes if episode.group_id == group_id]
 
         if len(episodes) == 0:
             raise NodeNotFoundError(uuid)
@@ -392,19 +349,54 @@ class EpisodicNode(Node):
         return episodes[0]
 
     @classmethod
-    async def get_by_uuids(cls, driver: GraphDriver, uuids: list[str]):
+    async def get_by_uuids(
+        cls,
+        driver: GraphDriver,
+        uuids: list[str],
+        group_id: str | None = None,
+        *,
+        require_all: bool = False,
+    ):
+        """Get episodes by UUID.
+
+        Parameters
+        ----------
+        driver : GraphDriver
+            The graph driver.
+        uuids : list[str]
+            The episode UUIDs.
+        group_id : str | None
+            If set, episodes in other groups are excluded. If None, no group check is performed.
+        require_all : bool
+            If True, raise NodeNotFoundError for the first UUID not found in the selected group.
+            If False, skip missing UUIDs.
+        """
         if driver.graph_operations_interface:
             try:
-                return await driver.graph_operations_interface.episodic_node_get_by_uuids(
+                episodes = await driver.graph_operations_interface.episodic_node_get_by_uuids(
                     cls, driver, uuids
                 )
             except NotImplementedError:
                 pass
+            else:
+                if group_id is not None:
+                    episodes = [episode for episode in episodes if episode.group_id == group_id]
+                if require_all:
+                    found_uuids = {episode.uuid for episode in episodes}
+                    for uuid in uuids:
+                        if uuid not in found_uuids:
+                            raise NodeNotFoundError(uuid)
+                return episodes
+
+        group_filter: LiteralString = 'AND e.group_id = $group_id' if group_id is not None else ''
 
         records, _, _ = await driver.execute_query(
             """
             MATCH (e:Episodic)
             WHERE e.uuid IN $uuids
+            """
+            + group_filter
+            + """
             RETURN DISTINCT
             """
             + (
@@ -413,10 +405,19 @@ class EpisodicNode(Node):
                 else EPISODIC_NODE_RETURN
             ),
             uuids=uuids,
+            group_id=group_id,
             routing_='r',
         )
 
         episodes = [get_episodic_node_from_record(record) for record in records]
+        if group_id is not None:
+            episodes = [episode for episode in episodes if episode.group_id == group_id]
+
+        if require_all:
+            found_uuids = {episode.uuid for episode in episodes}
+            for uuid in uuids:
+                if uuid not in found_uuids:
+                    raise NodeNotFoundError(uuid)
 
         return episodes
 
@@ -574,23 +575,15 @@ class EntityNode(Node):
             'created_at': self.created_at,
         }
 
-        if driver.provider == GraphProvider.KUZU:
-            entity_data['attributes'] = json.dumps(self.attributes)
-            entity_data['labels'] = list(set(self.labels + ['Entity']))
-            result = await driver.execute_query(
-                get_entity_node_save_query(driver.provider, labels=''),
-                **entity_data,
-            )
-        else:
-            for k, v in (self.attributes or {}).items():
-                if k not in entity_data:
-                    entity_data[k] = v
-            labels = ':'.join(self.labels + ['Entity'])
+        for k, v in (self.attributes or {}).items():
+            if k not in entity_data:
+                entity_data[k] = v
+        labels = ':'.join(self.labels + ['Entity'])
 
-            result = await driver.execute_query(
-                get_entity_node_save_query(driver.provider, labels),
-                entity_data=entity_data,
-            )
+        result = await driver.execute_query(
+            get_entity_node_save_query(driver.provider, labels),
+            entity_data=entity_data,
+        )
 
         logger.debug(f'Saved Node to Graph: {self.uuid}')
 
@@ -685,6 +678,74 @@ class EntityNode(Node):
         nodes = [get_entity_node_from_record(record, driver.provider) for record in records]
 
         return nodes
+
+    @classmethod
+    async def get_by_attribute_values(
+        cls,
+        driver: GraphDriver,
+        group_id: str,
+        attributes: dict[str, Any],
+        labels: list[str] | None = None,
+        limit: int = NODE_DEDUP_CANDIDATE_LIMIT,
+    ) -> list['EntityNode']:
+        """Retrieve nodes by attributes. Neptune does not support this lookup."""
+        if not attributes:
+            return []
+
+        property_names = list(attributes)
+        for property_name in property_names:
+            if not SAFE_CYPHER_IDENTIFIER_PATTERN.fullmatch(property_name):
+                raise ValueError(f'Invalid attribute name: {property_name}')
+
+        node_labels = list(labels or [])
+        validate_node_labels(node_labels)
+        filtered_labels = [label for label in node_labels if label != 'Entity']
+        label_query = ''.join(f':{label}' for label in filtered_labels)
+
+        if driver.graph_operations_interface:
+            try:
+                return await driver.graph_operations_interface.node_get_by_attribute_values(
+                    cls,
+                    driver,
+                    group_id,
+                    attributes,
+                    node_labels,
+                    limit,
+                )
+            except NotImplementedError:
+                pass
+
+        if driver.provider not in (GraphProvider.NEO4J, GraphProvider.FALKORDB):
+            raise NotImplementedError(
+                f'Attribute lookup is not supported for {driver.provider.value}'
+            )
+
+        attribute_conditions = [
+            f'AND n.`{property_name}` = $attribute_{index}'
+            for index, property_name in enumerate(property_names)
+        ]
+        query = (
+            f"""
+            MATCH (n:Entity{label_query})
+            WHERE n.group_id = $group_id
+            {' '.join(attribute_conditions)}
+            RETURN
+            """
+            + get_entity_node_return_query(driver.provider)
+            + """
+            LIMIT $limit
+            """
+        )
+        parameters = {
+            f'attribute_{index}': attributes[property_name]
+            for index, property_name in enumerate(property_names)
+        }
+        parameters.update(group_id=group_id, limit=limit)
+        if driver.provider == GraphProvider.NEO4J:
+            parameters['routing_'] = 'r'
+
+        records, _, _ = await driver.execute_query(query, **parameters)
+        return [get_entity_node_from_record(record, driver.provider) for record in records]
 
     @classmethod
     async def get_by_group_ids(
@@ -1190,17 +1251,14 @@ def get_entity_node_from_record(record: Any, provider: GraphProvider) -> EntityN
     # attributes, or its labels.
     record = dict(record)
 
-    if provider == GraphProvider.KUZU:
-        attributes = json.loads(record['attributes']) if record['attributes'] else {}
-    else:
-        attributes = dict(record['attributes'])
-        attributes.pop('uuid', None)
-        attributes.pop('name', None)
-        attributes.pop('group_id', None)
-        attributes.pop('name_embedding', None)
-        attributes.pop('summary', None)
-        attributes.pop('created_at', None)
-        attributes.pop('labels', None)
+    attributes = dict(record['attributes'])
+    attributes.pop('uuid', None)
+    attributes.pop('name', None)
+    attributes.pop('group_id', None)
+    attributes.pop('name_embedding', None)
+    attributes.pop('summary', None)
+    attributes.pop('created_at', None)
+    attributes.pop('labels', None)
 
     labels = record.get('labels')
     labels = list(labels) if labels is not None else []
