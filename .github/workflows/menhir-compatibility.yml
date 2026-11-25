@@ -28,11 +28,11 @@ jobs:
         run: python -m pip install -e . pytest pytest-asyncio pytest-timeout ruff pyright opentelemetry-sdk build
       - name: Check reconciled routing
         run: |
-          ruff check graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py tests/test_extraction_routing.py tests/test_candidate_filter.py tests/test_identity_gate.py tests/test_node_pre_resolution.py tests/test_request_scope_concurrency.py
+          ruff check graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py tests/test_extraction_routing.py tests/test_candidate_filter.py tests/test_identity_gate.py tests/test_node_pre_resolution.py tests/test_request_scope_concurrency.py tests/test_concurrent_ingestion_fork_guard.py
           ruff check graphiti_core/edge_expiry.py graphiti_core/edge_invalidation.py graphiti_core/utils/maintenance/edge_operations.py graphiti_core/utils/bulk_utils.py graphiti_core/edges.py tests/test_edge_expiry.py tests/test_edge_copy_reconcile.py tests/test_edge_copy_attributes.py tests/test_preserved_edge_attributes.py tests/test_edge_invalidation.py
           ruff check graphiti_core/models/edges/edge_db_queries.py tests/test_entity_edge_save_keeps_expiry.py tests/test_entity_edge_save_keeps_expiry_int.py
-          ruff check graphiti_core/driver/record_parsers.py graphiti_core/driver/neo4j/operations/entity_edge_ops.py graphiti_core/driver/falkordb/operations/entity_edge_ops.py graphiti_core/driver/neptune/operations/entity_edge_ops.py graphiti_core/driver/kuzu/operations/entity_edge_ops.py tests/test_entity_edge_save_rows.py tests/test_entity_edge_save_rows_int.py tests/test_entity_edge_saved_expiry.py tests/test_entity_edge_saved_expiry_int.py tests/test_entity_edge_save_after_delete.py tests/test_entity_edge_save_after_delete_int.py tests/test_add_triplet_self_candidate.py tests/test_add_triplet_self_candidate_int.py tests/test_preserved_edge_attributes_validation.py
-          pyright graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py graphiti_core/edge_expiry.py graphiti_core/edge_invalidation.py graphiti_core/utils/maintenance/edge_operations.py graphiti_core/utils/bulk_utils.py graphiti_core/edges.py graphiti_core/models/edges/edge_db_queries.py graphiti_core/driver/record_parsers.py graphiti_core/driver/neo4j/operations/entity_edge_ops.py graphiti_core/driver/falkordb/operations/entity_edge_ops.py graphiti_core/driver/neptune/operations/entity_edge_ops.py graphiti_core/driver/kuzu/operations/entity_edge_ops.py
+          ruff check graphiti_core/driver/record_parsers.py graphiti_core/driver/neo4j/operations/entity_edge_ops.py graphiti_core/driver/falkordb/operations/entity_edge_ops.py graphiti_core/driver/neptune/operations/entity_edge_ops.py graphiti_core/driver/relate/operations/entity_edge_ops.py tests/test_entity_edge_save_rows.py tests/test_entity_edge_save_rows_int.py tests/test_entity_edge_saved_expiry.py tests/test_entity_edge_saved_expiry_int.py tests/test_entity_edge_save_after_delete.py tests/test_entity_edge_save_after_delete_int.py tests/test_add_triplet_self_candidate.py tests/test_add_triplet_self_candidate_int.py tests/test_preserved_edge_attributes_validation.py
+          pyright graphiti_core/graphiti.py graphiti_core/utils/maintenance/node_operations.py graphiti_core/edge_expiry.py graphiti_core/edge_invalidation.py graphiti_core/utils/maintenance/edge_operations.py graphiti_core/utils/bulk_utils.py graphiti_core/edges.py graphiti_core/models/edges/edge_db_queries.py graphiti_core/driver/record_parsers.py graphiti_core/driver/neo4j/operations/entity_edge_ops.py graphiti_core/driver/falkordb/operations/entity_edge_ops.py graphiti_core/driver/neptune/operations/entity_edge_ops.py graphiti_core/driver/relate/operations/entity_edge_ops.py
       - name: Verify fork contracts and upstream changes without services
         run: |
           python -m pytest -q --timeout=60 \
@@ -61,6 +61,6 @@ jobs:
             tests/utils/maintenance/test_edge_dedup_scenarios.py \
             tests/utils/maintenance/test_temporal_edge_utils.py \
             tests/utils/maintenance/test_configurable_prompts.py \
-            tests/test_graphiti_configurable_prompts.py
+            tests/test_graphiti_configurable_prompts.py \n            tests/test_concurrent_ingestion_fork_guard.py
       - name: Build distributable
         run: python -m build

@@ -52,9 +52,7 @@ def _valid_record(**overrides: Any) -> dict[str, Any]:
 
 
 def _resolve(record: dict[str, Any], provider: GraphProvider) -> Any:
-    # Needed because non-KUZU paths require a dict attributes value.
-    if provider != GraphProvider.KUZU:
-        record.setdefault('attributes', {})
+    record.setdefault('attributes', {})
     return get_entity_node_from_record(record, provider)
 
 
@@ -348,21 +346,6 @@ def test_search_utils_call_sites_get_native_behavior():
     node = search_utils.get_entity_node_from_record(record, GraphProvider.NEO4J)
     assert node.group_id == 'via-search-utils'
     assert len(calls) == 1
-
-
-# --- KUZU ---
-
-
-def test_kuzu_string_attributes_supported():
-    import json
-
-    record = _valid_record(
-        attributes=json.dumps({'custom': 'kuzu-value'}),
-        labels=['Entity'],
-    )
-    node = _resolve(record, GraphProvider.KUZU)
-    assert node.attributes == {'custom': 'kuzu-value'}
-    assert record['attributes'] == json.dumps({'custom': 'kuzu-value'})
 
 
 # --- fork hygiene ---

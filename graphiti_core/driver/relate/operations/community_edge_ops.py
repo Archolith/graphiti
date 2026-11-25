@@ -41,14 +41,14 @@ def _community_edge_from_record(record: Any) -> CommunityEdge:
     )
 
 
-class KuzuCommunityEdgeOperations(CommunityEdgeOperations):
+class RelateCommunityEdgeOperations(CommunityEdgeOperations):
     async def save(
         self,
         executor: QueryExecutor,
         edge: CommunityEdge,
         tx: Transaction | None = None,
     ) -> None:
-        query = get_community_edge_save_query(GraphProvider.KUZU)
+        query = get_community_edge_save_query(GraphProvider.RELATE)
         params: dict[str, Any] = {
             'community_uuid': edge.source_node_uuid,
             'entity_uuid': edge.target_node_uuid,
@@ -70,7 +70,7 @@ class KuzuCommunityEdgeOperations(CommunityEdgeOperations):
         tx: Transaction | None = None,
     ) -> None:
         query = """
-            MATCH (n:Community)-[e:HAS_MEMBER {uuid: $uuid}]->(m)
+            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER {uuid: $uuid}]->(m)
             DELETE e
         """
         if tx is not None:
@@ -86,8 +86,10 @@ class KuzuCommunityEdgeOperations(CommunityEdgeOperations):
         uuids: list[str],
         tx: Transaction | None = None,
     ) -> None:
+        if not uuids:
+            return
         query = """
-            MATCH (n:Community)-[e:HAS_MEMBER]->(m)
+            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m)
             WHERE e.uuid IN $uuids
             DELETE e
         """
@@ -119,6 +121,8 @@ class KuzuCommunityEdgeOperations(CommunityEdgeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[CommunityEdge]:
+        if not uuids:
+            return []
         query = (
             """
             MATCH (n:Community)-[e:HAS_MEMBER]->(m)

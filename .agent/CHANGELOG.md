@@ -1,5 +1,26 @@
 # Changelog — graphiti
 
+## 2026-11-25 — Sync upstream 0.32.1 (`0.32.1.post1`)
+
+- Merged upstream `v0.32.1` (concurrent ingestion #2154, group-checked UUID operations #2178, identity
+  merge #2153, Kuzu removal #2151, Relate driver). Every fork seam is kept; where upstream rewrote the
+  same code (node resolution split into `resolve_extracted_nodes` / `resolve_nodes_with_candidates`,
+  `decide_edge_against_candidates`, `_entity_node_record` / `_entity_edge_record`, `write_timeout`) its
+  structure is adopted and the fork seam re-applied. `_entity_edge_record` uses `entity_edge_save_row`.
+- `graphiti.py`, `ingestion/scheduler.py`: `Graphiti.add_episode` / `add_episode_bulk` and the public
+  `ConcurrentIngestor.add_episode` / `add_episode_bulk` raise `ValueError` before concurrent ingestion
+  when a fork seam is in use (`new_episode_uuid`, `publish_fence`, any fork hook,
+  `preserved_edge_attributes`); `single_episode_extraction_hook` gets a class-level default.
+- `ingestion/phases.py`: the invalidation call uses the fork's async `_apply_temporal_invalidation`.
+- `driver/relate/operations/entity_edge_ops.py`: upstream's file, unchanged (no copy reconciliation in
+  `save_bulk`; Menhir uses Neo4j only). `.agent/architecture.md` lists what concurrent ingestion lacks.
+- `add_episode` always passes `identity_properties` to `resolve_extracted_nodes`, as upstream does.
+- Kuzu removed from the fork tests and the compatibility workflow lists (Relate ops added);
+  `pyproject.toml` version `0.32.1.post1`, `uv.lock` regenerated, `README.md` version lines.
+- Tests: `test_concurrent_ingestion_fork_guard.py` (also in the compatibility workflow); the two resolver
+  census tests exempt `graphiti_core/ingestion/`; upstream test stubs gain the fork attributes, and three
+  identity-property tests pin the separate extraction route. No assertions changed.
+
 ## 2026-11-22 — Release prep for `v0.31.2.post4`
 
 - `pyproject.toml`, `uv.lock` (project entry only), `.github/workflows/release-graphiti-core.yml` (reviewed

@@ -14,32 +14,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import json
 import logging
 from typing import Any
 
 from graphiti_core.driver.driver import GraphProvider
-from graphiti_core.driver.kuzu.operations.record_parsers import parse_kuzu_entity_edge
 from graphiti_core.driver.operations.entity_edge_ops import EntityEdgeOperations
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
+from graphiti_core.driver.record_parsers import entity_edge_from_record
 from graphiti_core.edges import EntityEdge
 from graphiti_core.errors import EdgeNotFoundError
 from graphiti_core.models.edges.edge_db_queries import (
     get_entity_edge_return_query,
+    get_entity_edge_save_bulk_query,
     get_entity_edge_save_query,
+    get_entity_edge_update_bulk_query,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class KuzuEntityEdgeOperations(EntityEdgeOperations):
+class RelateEntityEdgeOperations(EntityEdgeOperations):
     async def save(
         self,
         executor: QueryExecutor,
         edge: EntityEdge,
         tx: Transaction | None = None,
     ) -> None:
-        params: dict[str, Any] = {
+        edge_data: dict[str, Any] = {
             'uuid': edge.uuid,
             'source_uuid': edge.source_node_uuid,
             'target_uuid': edge.target_node_uuid,
@@ -52,16 +53,17 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
             'expired_at': edge.expired_at,
             'valid_at': edge.valid_at,
             'invalid_at': edge.invalid_at,
-            # Archolith fork: the Kuzu save query sets e.reference_time (menhir#260).
             'reference_time': edge.reference_time,
-            'attributes': json.dumps(edge.attributes or {}),
         }
+        for key, value in (edge.attributes or {}).items():
+            if key not in edge_data:
+                edge_data[key] = value
 
-        query = get_entity_edge_save_query(GraphProvider.KUZU)
+        query = get_entity_edge_save_query(GraphProvider.RELATE)
         if tx is not None:
-            await tx.run(query, **params)
+            await tx.run(query, edge_data=edge_data)
         else:
-            await executor.execute_query(query, **params)
+            await executor.execute_query(query, edge_data=edge_data)
 
         logger.debug(f'Saved Edge to Graph: {edge.uuid}')
 
@@ -70,11 +72,64 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         executor: QueryExecutor,
         edges: list[EntityEdge],
         tx: Transaction | None = None,
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
-        # Kuzu doesn't support UNWIND - iterate and save individually
+        if not edges:
+            return
+
+        prepared: list[dict[str, Any]] = []
         for edge in edges:
-            await self.save(executor, edge, tx=tx)
+            edge_data: dict[str, Any] = {
+                'uuid': edge.uuid,
+                'source_node_uuid': edge.source_node_uuid,
+                'target_node_uuid': edge.target_node_uuid,
+                'name': edge.name,
+                'fact': edge.fact,
+                'fact_embedding': edge.fact_embedding,
+                'group_id': edge.group_id,
+                'episodes': edge.episodes,
+                'created_at': edge.created_at,
+                'expired_at': edge.expired_at,
+                'valid_at': edge.valid_at,
+                'invalid_at': edge.invalid_at,
+                'reference_time': edge.reference_time,
+            }
+            for key, value in (edge.attributes or {}).items():
+                if key not in edge_data:
+                    edge_data[key] = value
+            prepared.append(edge_data)
+
+        await self.save_bulk_records(executor, prepared, tx)
+
+    async def save_bulk_records(
+        self,
+        executor: QueryExecutor,
+        records: list[dict[str, Any]],
+        tx: Transaction | None = None,
+    ) -> None:
+        """Write entity edge records in a single query."""
+        if not records:
+            return
+        query = get_entity_edge_save_bulk_query(GraphProvider.RELATE)
+        if tx is not None:
+            await tx.run(query, entity_edges=records)
+        else:
+            await executor.execute_query(query, entity_edges=records)
+
+    async def update_bulk_records(
+        self,
+        executor: QueryExecutor,
+        records: list[dict[str, Any]],
+        tx: Transaction | None = None,
+    ) -> None:
+        """Update entity edge records that exist. An edge that does not exist is not created."""
+        if not records:
+            return
+        query = get_entity_edge_update_bulk_query(GraphProvider.RELATE)
+        if tx is not None:
+            await tx.run(query, entity_edges=records)
+        else:
+            await executor.execute_query(query, entity_edges=records)
 
     async def delete(
         self,
@@ -83,8 +138,8 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         tx: Transaction | None = None,
     ) -> None:
         query = """
-            MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_ {uuid: $uuid})-[:RELATES_TO]->(m:Entity)
-            DETACH DELETE e
+            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER {uuid: $uuid}]->(m)
+            DELETE e
         """
         if tx is not None:
             await tx.run(query, uuid=edge.uuid)
@@ -99,10 +154,12 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         uuids: list[str],
         tx: Transaction | None = None,
     ) -> None:
+        if not uuids:
+            return
         query = """
-            MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
+            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m)
             WHERE e.uuid IN $uuids
-            DETACH DELETE e
+            DELETE e
         """
         if tx is not None:
             await tx.run(query, uuids=uuids)
@@ -115,11 +172,11 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         uuid: str,
     ) -> EntityEdge:
         query = """
-            MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_ {uuid: $uuid})-[:RELATES_TO]->(m:Entity)
+            MATCH (n:Entity)-[e:RELATES_TO {uuid: $uuid}]->(m:Entity)
             RETURN
-            """ + get_entity_edge_return_query(GraphProvider.KUZU)
+            """ + get_entity_edge_return_query(GraphProvider.RELATE)
         records, _, _ = await executor.execute_query(query, uuid=uuid)
-        edges = [parse_kuzu_entity_edge(r) for r in records]
+        edges = [entity_edge_from_record(r) for r in records]
         if len(edges) == 0:
             raise EdgeNotFoundError(uuid)
         return edges[0]
@@ -132,12 +189,12 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         if not uuids:
             return []
         query = """
-            MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
+            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
             WHERE e.uuid IN $uuids
             RETURN
-            """ + get_entity_edge_return_query(GraphProvider.KUZU)
+            """ + get_entity_edge_return_query(GraphProvider.RELATE)
         records, _, _ = await executor.execute_query(query, uuids=uuids)
-        return [parse_kuzu_entity_edge(r) for r in records]
+        return [entity_edge_from_record(r) for r in records]
 
     async def get_by_group_ids(
         self,
@@ -150,14 +207,14 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         limit_clause = 'LIMIT $limit' if limit is not None else ''
         query = (
             """
-            MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
+            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
             WHERE e.group_id IN $group_ids
             """
             + cursor_clause
             + """
             RETURN
             """
-            + get_entity_edge_return_query(GraphProvider.KUZU)
+            + get_entity_edge_return_query(GraphProvider.RELATE)
             + """
             ORDER BY e.uuid DESC
             """
@@ -169,7 +226,7 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
             uuid=uuid_cursor,
             limit=limit,
         )
-        return [parse_kuzu_entity_edge(r) for r in records]
+        return [entity_edge_from_record(r) for r in records]
 
     async def get_between_nodes(
         self,
@@ -178,15 +235,15 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         target_node_uuid: str,
     ) -> list[EntityEdge]:
         query = """
-            MATCH (n:Entity {uuid: $source_node_uuid})-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity {uuid: $target_node_uuid})
+            MATCH (n:Entity {uuid: $source_node_uuid})-[e:RELATES_TO]->(m:Entity {uuid: $target_node_uuid})
             RETURN
-            """ + get_entity_edge_return_query(GraphProvider.KUZU)
+            """ + get_entity_edge_return_query(GraphProvider.RELATE)
         records, _, _ = await executor.execute_query(
             query,
             source_node_uuid=source_node_uuid,
             target_node_uuid=target_node_uuid,
         )
-        return [parse_kuzu_entity_edge(r) for r in records]
+        return [entity_edge_from_record(r) for r in records]
 
     async def get_by_node_uuid(
         self,
@@ -194,11 +251,11 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         node_uuid: str,
     ) -> list[EntityEdge]:
         query = """
-            MATCH (n:Entity {uuid: $node_uuid})-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
+            MATCH (n:Entity {uuid: $node_uuid})-[e:RELATES_TO]-(m:Entity)
             RETURN
-            """ + get_entity_edge_return_query(GraphProvider.KUZU)
+            """ + get_entity_edge_return_query(GraphProvider.RELATE)
         records, _, _ = await executor.execute_query(query, node_uuid=node_uuid)
-        return [parse_kuzu_entity_edge(r) for r in records]
+        return [entity_edge_from_record(r) for r in records]
 
     async def load_embeddings(
         self,
@@ -206,7 +263,7 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         edge: EntityEdge,
     ) -> None:
         query = """
-            MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_ {uuid: $uuid})-[:RELATES_TO]->(m:Entity)
+            MATCH (n:Entity)-[e:RELATES_TO {uuid: $uuid}]->(m:Entity)
             RETURN e.fact_embedding AS fact_embedding
         """
         records, _, _ = await executor.execute_query(query, uuid=edge.uuid)
@@ -218,11 +275,13 @@ class KuzuEntityEdgeOperations(EntityEdgeOperations):
         self,
         executor: QueryExecutor,
         edges: list[EntityEdge],
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> None:
+        if not edges:
+            return
         uuids = [e.uuid for e in edges]
         query = """
-            MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
+            MATCH (n:Entity)-[e:RELATES_TO]-(m:Entity)
             WHERE e.uuid IN $edge_uuids
             RETURN DISTINCT e.uuid AS uuid, e.fact_embedding AS fact_embedding
         """

@@ -428,7 +428,9 @@ async def test_add_episode_combined_route_wiring_end_to_end(monkeypatch, base_da
         calls['extract_edges'] += 1
         raise AssertionError('extract_edges must not run on the combined route')
 
-    async def fake_resolve_nodes(clients, extracted_nodes, ep, previous_episodes, entity_types):
+    async def fake_resolve_nodes(
+        clients, extracted_nodes, ep, previous_episodes, entity_types, **kwargs
+    ):
         assert clients.driver._database == GROUP_ID
         return [node_a, node_b], {}, []
 

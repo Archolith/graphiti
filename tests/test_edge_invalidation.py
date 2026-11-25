@@ -1133,6 +1133,11 @@ def test_every_resolver_call_in_graphiti_core_threads_the_invalidation_hook():
     package = Path(__file__).resolve().parents[1] / 'graphiti_core'
     found = invalidation_threaded = expiry_threaded = 0
     for path in package.rglob('*.py'):
+        # graphiti_core/ingestion/ is exempt: Graphiti.add_episode and add_episode_bulk raise
+        # ValueError before routing to it when any fork seam is set
+        # (_reject_fork_seams_for_concurrent_ingestion).
+        if 'ingestion' in path.relative_to(package).parts[:1]:
+            continue
         for call in _resolver_calls(path):
             found += 1
             assert _threads(call, 'edge_invalidation_kwargs', 'edge_invalidation_hook'), (
