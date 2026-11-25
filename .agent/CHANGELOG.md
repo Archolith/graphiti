@@ -17,7 +17,9 @@
     that function turns batching off.
 - `prompts/dedupe_edges.py`: batch items validate like `EdgeDuplicate`; the lenient pre-validator is
   removed. `resolve_edges_batch` is no longer abstract, and `validate_prompt_library` accepts a
-  library without it.
+  library without it. The batch prompt carries `resolve_edge`'s rules and all eight of its examples
+  (the Sam, Priya and payments examples were missing; 1,648 `o200k_base` system tokens), and a
+  parity test fails if a `resolve_edge` example fact is absent from it.
 - Tests: `test_batch_edge_dedupe_review_fixes.py`; the legacy prompt test context gains
   `edge_requests`. Both batch test files and that test join the compatibility workflow.
 

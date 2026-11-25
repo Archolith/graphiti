@@ -164,6 +164,8 @@ def resolve_edge(context: dict[str, Any]) -> list[Message]:
 
 
 # Static-first cacheable system prompt for batched edge deduplication (Menhir #91 Path B).
+# Its dedupe and contradiction rules and its examples are resolve_edge's, so a batched decision
+# follows the same policy as a per-edge one; test_batch_prompt_rules_match_resolve_edge checks it.
 # Clears OpenAI's 1,024-token message-boundary prefix cache floor while resolving N independent
 # edge requests in a single LLM round-trip.
 _RESOLVE_EDGES_BATCH_SYSTEM_PROMPT = """You are a fact deduplication assistant. NEVER mark facts as contradicted unless the new fact explicitly makes the old fact false.
@@ -221,21 +223,39 @@ Input EDGE REQUESTS:
   },
   {
     "request_id": 2,
+    "existing_edges": [{"idx": 0, "fact": "Bob ran 5 miles on Tuesday"}],
+    "edge_invalidation_candidates": [{"idx": 1, "fact": "Bob ran 3 miles on Wednesday"}],
+    "new_edge": "Bob ran 3 miles on Wednesday"
+  },
+  {
+    "request_id": 3,
     "existing_edges": [{"idx": 0, "fact": "Maya is the DRI for the billing migration"}],
     "edge_invalidation_candidates": [],
     "new_edge": "Maya merged the retry fix for the billing migration"
   },
   {
-    "request_id": 3,
+    "request_id": 4,
+    "existing_edges": [{"idx": 0, "fact": "The payments service uses Redis for session storage"}],
+    "edge_invalidation_candidates": [],
+    "new_edge": "The payments service replaced Redis with PostgreSQL for session storage"
+  },
+  {
+    "request_id": 5,
+    "existing_edges": [{"idx": 0, "fact": "Sam owns 2 bicycles"}],
+    "edge_invalidation_candidates": [],
+    "new_edge": "Sam owns 3 bicycles"
+  },
+  {
+    "request_id": 6,
+    "existing_edges": [{"idx": 0, "fact": "Priya speaks English"}],
+    "edge_invalidation_candidates": [],
+    "new_edge": "Priya speaks Japanese"
+  },
+  {
+    "request_id": 7,
     "existing_edges": [{"idx": 0, "fact": "Acme API runs on v1"}],
     "edge_invalidation_candidates": [{"idx": 1, "fact": "Acme API defaults to v1 auth"}],
     "new_edge": "Acme API migrated to v2 auth and retired v1"
-  },
-  {
-    "request_id": 4,
-    "existing_edges": [{"idx": 0, "fact": "Bob ran 5 miles on Tuesday"}],
-    "edge_invalidation_candidates": [{"idx": 1, "fact": "Bob ran 3 miles on Wednesday"}],
-    "new_edge": "Bob ran 3 miles on Wednesday"
   }
 ]
 
@@ -244,10 +264,13 @@ Result edge_resolutions:
   {"request_id": 0, "duplicate_facts": [0], "contradicted_facts": []},
   {"request_id": 1, "duplicate_facts": [], "contradicted_facts": [0]},
   {"request_id": 2, "duplicate_facts": [], "contradicted_facts": []},
-  {"request_id": 3, "duplicate_facts": [], "contradicted_facts": [0, 1]},
-  {"request_id": 4, "duplicate_facts": [], "contradicted_facts": []}
+  {"request_id": 3, "duplicate_facts": [], "contradicted_facts": []},
+  {"request_id": 4, "duplicate_facts": [], "contradicted_facts": [0]},
+  {"request_id": 5, "duplicate_facts": [], "contradicted_facts": [0]},
+  {"request_id": 6, "duplicate_facts": [], "contradicted_facts": []},
+  {"request_id": 7, "duplicate_facts": [], "contradicted_facts": [0, 1]}
 ]
-(Notes: request 0 is an exact duplicate; request 1 is a title update contradiction, not a duplicate; request 2 is project activity compatible with DRI ownership; request 3 contradicts both existing_edges idx 0 and invalidation candidate idx 1; request 4 has identical text only in edge_invalidation_candidates idx 1 which is NEVER placed in duplicate_facts.)
+(Notes: request 0: identical factual information; request 1: same relationship but updated title, a contradiction and NOT a duplicate; request 2: idx 0 is a different event on a different day, neither duplicate nor contradiction; the identical text appears only in edge_invalidation_candidates idx 1, which is NEVER placed in duplicate_facts; request 3: project work does not contradict ownership or responsibility; request 4: explicit architectural replacement supersedes the old choice; request 5: updated current count, NOT a duplicate because the numeric value changed; request 6: additive non-exclusive facts can both be true; request 7: idx 1 from edge_invalidation_candidates may only appear in contradicted_facts, never duplicate_facts.)
 </EXAMPLE>"""
 
 

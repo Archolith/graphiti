@@ -5,6 +5,7 @@ Each test names the review finding it covers.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -105,7 +106,9 @@ class _RecordingExpiryHook:
 # F1: an edge whose only candidates the prefilter drops still gets own-end expiry and the hook.
 async def test_prefilter_emptied_edge_with_own_end_is_expired_and_hook_consulted(monkeypatch):
     monkeypatch.setattr(edge_ops, 'create_entity_edge_embeddings', AsyncMock(return_value=None))
-    stale = _edge('stale', 'a', 'c', 'Alice used RabbitMQ', valid_at=_ts(2024), invalid_at=_ts(2025))
+    stale = _edge(
+        'stale', 'a', 'c', 'Alice used RabbitMQ', valid_at=_ts(2024), invalid_at=_ts(2025)
+    )
     monkeypatch.setattr(edge_ops, 'search', _stale_only_search(stale))
     clients = _clients(AsyncMock(side_effect=AssertionError('no model call expected')))
     hook = _RecordingExpiryHook()
@@ -127,7 +130,9 @@ async def test_prefilter_emptied_edge_with_own_end_is_expired_and_hook_consulted
 
 # F1 on the single-edge path (add_triplet uses resolve_extracted_edge).
 async def test_single_edge_path_prefilter_emptied_edge_is_expired():
-    stale = _edge('stale', 'a', 'c', 'Alice used RabbitMQ', valid_at=_ts(2024), invalid_at=_ts(2025))
+    stale = _edge(
+        'stale', 'a', 'c', 'Alice used RabbitMQ', valid_at=_ts(2024), invalid_at=_ts(2025)
+    )
     clients = _clients(AsyncMock(side_effect=AssertionError('no model call expected')))
     extracted = _edge(
         'new', 'a', 'b', 'Alice uses Kafka', valid_at=_ts(2026, 6, 1), invalid_at=_ts(2026, 9, 1)
@@ -145,7 +150,9 @@ async def test_single_edge_path_prefilter_emptied_edge_is_expired():
 # N1: the trace records the candidates the prefilter dropped, so commit repair skips them.
 async def test_trace_records_candidates_before_prefilter(monkeypatch):
     monkeypatch.setattr(edge_ops, 'create_entity_edge_embeddings', AsyncMock(return_value=None))
-    stale = _edge('stale', 'a', 'c', 'Alice used RabbitMQ', valid_at=_ts(2024), invalid_at=_ts(2025))
+    stale = _edge(
+        'stale', 'a', 'c', 'Alice used RabbitMQ', valid_at=_ts(2024), invalid_at=_ts(2025)
+    )
     monkeypatch.setattr(edge_ops, 'search', _stale_only_search(stale))
     clients = _clients(AsyncMock(return_value={}))
     trace = ResolutionTrace()
@@ -203,7 +210,10 @@ async def test_batch_chunk_with_missing_fields_falls_back():
         }
     )
 
-    assert await _resolve_edge_dedupe_batch_chunk(llm_client, [0, 1], extracted, related, existing) is None
+    assert (
+        await _resolve_edge_dedupe_batch_chunk(llm_client, [0, 1], extracted, related, existing)
+        is None
+    )
 
 
 # F4: an idx outside a request's own range rejects the chunk.
@@ -231,7 +241,10 @@ async def test_batch_chunk_out_of_range_idx_falls_back(resolutions):
     llm_client = MagicMock()
     llm_client.generate_response = AsyncMock(return_value={'edge_resolutions': resolutions})
 
-    assert await _resolve_edge_dedupe_batch_chunk(llm_client, [0, 1], extracted, related, existing) is None
+    assert (
+        await _resolve_edge_dedupe_batch_chunk(llm_client, [0, 1], extracted, related, existing)
+        is None
+    )
 
 
 async def test_batch_chunk_in_range_answers_are_accepted():
@@ -246,7 +259,9 @@ async def test_batch_chunk_in_range_answers_are_accepted():
         }
     )
 
-    result = await _resolve_edge_dedupe_batch_chunk(llm_client, [0, 1], extracted, related, existing)
+    result = await _resolve_edge_dedupe_batch_chunk(
+        llm_client, [0, 1], extracted, related, existing
+    )
 
     assert result is not None
     assert result[0].duplicate_facts == [0]
@@ -281,7 +296,10 @@ async def test_batch_chunk_falls_back_on_non_provider_error():
     llm_client = MagicMock()
     llm_client.generate_response = AsyncMock(side_effect=ValueError('unparseable output'))
 
-    assert await _resolve_edge_dedupe_batch_chunk(llm_client, [0, 1], extracted, related, existing) is None
+    assert (
+        await _resolve_edge_dedupe_batch_chunk(llm_client, [0, 1], extracted, related, existing)
+        is None
+    )
 
 
 # N4: replacing decide_edge_against_candidates turns batching off.
@@ -301,9 +319,13 @@ async def test_upstream_signature_decide_replacement_is_called_without_new_kwarg
     original = edge_ops.decide_edge_against_candidates
     seen_kwargs: list[dict[str, Any]] = []
 
-    async def upstream_signature(llm_client, extracted_edge, related_edges, existing_edges, *, clients=None):
+    async def upstream_signature(
+        llm_client, extracted_edge, related_edges, existing_edges, *, clients=None
+    ):
         seen_kwargs.append({'clients': clients})
-        return await original(llm_client, extracted_edge, related_edges, existing_edges, clients=clients)
+        return await original(
+            llm_client, extracted_edge, related_edges, existing_edges, clients=clients
+        )
 
     monkeypatch.setattr(edge_ops, 'decide_edge_against_candidates', upstream_signature)
     clients = _clients(AsyncMock(return_value={'duplicate_facts': [], 'contradicted_facts': []}))
@@ -345,3 +367,47 @@ def test_duck_typed_library_without_batch_prompt_validates():
         )
 
     validate_prompt_library(SimpleNamespace(**groups))
+
+
+# F3: the batch prompt applies resolve_edge's dedupe and contradiction policy and its examples.
+_SHARED_RULES = [
+    'NEVER mark facts as contradicted unless the new fact explicitly makes the old fact false.',
+    'NEVER mark facts as duplicates if they have key differences, particularly around numeric values, '
+    'dates, or key qualifiers.',
+    'represents identical factual information as any fact in',
+    'Do NOT treat additional activity, progress, status, or project-update facts as contradictions of '
+    'role, ownership, responsibility, membership, or assignment facts.',
+    'A contradiction requires explicit evidence that the old fact stopped being true or was replaced, '
+    'such as clear termination, replacement, transfer, or mutually exclusive current-state language.',
+    'Do NOT infer contradiction from recency alone, episode dates, meeting dates, weekly snapshots,',
+    'can be both a duplicate AND contradicted only when the same assertion is restated with an explicit '
+    'incompatible change.',
+    '(including clear paraphrases with the exact same meaning, dates, and quantities)',
+    'even if the wording looks identical.',
+    'Do NOT mark additive facts as contradictions when both can remain true simultaneously (for example, '
+    'speaking multiple languages or working on multiple projects).',
+]
+
+
+def _flat(messages: list[Any]) -> str:
+    return ' '.join(' '.join(message.content for message in messages).split())
+
+
+def test_batch_prompt_rules_match_resolve_edge():
+    single = _flat(
+        dedupe_edges.resolve_edge(
+            {'existing_edges': [], 'edge_invalidation_candidates': [], 'new_edge': 'x'}
+        )
+    )
+    batch = _flat(dedupe_edges.resolve_edges_batch({'edge_requests': []}))
+
+    for rule in _SHARED_RULES:
+        assert rule in single, rule
+        assert rule in batch, rule
+    # Every example fact resolve_edge teaches with is taught in the batch prompt too.
+    example_facts = re.findall(
+        r'"([^"]+)"', dedupe_edges._RESOLVE_EDGE_SYSTEM_PROMPT.split('<EXAMPLE>')[1]
+    )
+    assert len(example_facts) >= 8
+    for fact in example_facts:
+        assert f'"{fact}"' in dedupe_edges._RESOLVE_EDGES_BATCH_SYSTEM_PROMPT, fact
