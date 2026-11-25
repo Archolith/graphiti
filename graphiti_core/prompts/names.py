@@ -46,6 +46,7 @@ PromptName = Literal[
     'extract_edges.extract_timestamps_batch',
     'extract_nodes_and_edges.extract_message',
     'dedupe_edges.resolve_edge',
+    'dedupe_edges.resolve_edges_batch',
     'summarize_nodes.summarize_pair',
     'summarize_nodes.summarize_context',
     'summarize_nodes.summary_description',

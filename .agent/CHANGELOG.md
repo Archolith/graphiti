@@ -1,5 +1,28 @@
 # Changelog — graphiti
 
+## 2026-11-25 — Batched edge deduplication, temporal invalidation prefilter, and exact-edge pre-search bypass (menhir#91 Path B)
+
+- `graphiti_core/prompts/dedupe_edges.py`, `prompts/names.py`, `prompts/lib.py`,
+  `llm_client/prompt_config.py`: add `EdgeDuplicateBatchItem`, `EdgeDuplicateBatch`, and static-first
+  cacheable `resolve_edges_batch` (`dedupe_edges.resolve_edges_batch`, > 1,024 `o200k_base` system
+  tokens) to resolve bounded chunks of independent edge deduplication requests in a single LLM call.
+- `graphiti_core/utils/maintenance/edge_operations.py`:
+  - Phase 3 batched edge resolution in `resolve_extracted_edges` (`batch_edge_dedupe: bool = True`):
+    batches >= 2 semantic edges into bounded chunks (`EDGE_DEDUP_BATCH_MAX_ITEMS = 12`,
+    `EDGE_DEDUP_BATCH_MAX_CHARS = 24_000`, ceiling-aware), validates exact `request_id` bijection
+    with per-chunk fallback to `dedupe_edges.resolve_edge`, preserves custom prompt routing /
+    overrides untouched, and feeds decisions through `_dedupe_extracted_edge` so all provenance,
+    attribute, self-copy, and temporal-invalidation logic stays single-sourced.
+  - Item 1.6 deterministic temporal prefilter (`_prefilter_invalidation_candidates`): drops
+    invalidation candidates whose validity window provably ended (`candidate.invalid_at <= r.valid_at`)
+    for every possible resolved edge in `[extracted_edge, *related_edges]` before the LLM call (never
+    filtering duplicate candidates).
+  - Item 1.7 exact-edge pre-search bypass: resolves verbatim `existing_edges_override` hits before
+    both hybrid searches and skips the unfiltered graph-wide invalidation search when the pair-scoped
+    search already returned a verbatim same-direction match.
+- Tests: `tests/utils/maintenance/test_batch_edge_dedupe.py`; updated exact-fact search-count
+  assertions in `tests/utils/maintenance/test_edge_operations.py` and
+  `tests/utils/maintenance/test_edge_dedup_scenarios.py`.
 ## 2026-11-25 — Cacheable static-first dedupe prompts and default-namespace exact-name lookup (menhir#91, menhir#93)
 
 - `graphiti_core/prompts/dedupe_edges.py`: move all static rules, constraints, and disambiguation

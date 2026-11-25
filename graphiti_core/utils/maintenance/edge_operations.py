@@ -52,15 +52,17 @@ from graphiti_core.graphiti_types import (
 )
 from graphiti_core.helpers import semaphore_gather
 from graphiti_core.llm_client import LLMClient
+from graphiti_core.llm_client.client import RateLimitError
 from graphiti_core.llm_client.config import ModelSize
 from graphiti_core.nodes import CommunityNode, EntityNode, EpisodicNode
 from graphiti_core.prompts import prompt_library
-from graphiti_core.prompts.dedupe_edges import EdgeDuplicate
+from graphiti_core.prompts.dedupe_edges import EdgeDuplicate, EdgeDuplicateBatch
 from graphiti_core.prompts.extract_edges import Edge as ExtractedEdge
 from graphiti_core.prompts.extract_edges import (
     EdgeTimestamps,
     ExtractedEdges,
 )
+from graphiti_core.prompts.prompt_helpers import to_prompt_json
 from graphiti_core.search.search import search
 from graphiti_core.search.search_config import SearchResults
 from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
@@ -84,6 +86,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_EDGE_NAME = 'RELATES_TO'
+
+# Bounded batching limits for multi-edge semantic deduplication (Menhir #91 Path B).
+EDGE_DEDUP_BATCH_MAX_ITEMS = 12
+EDGE_DEDUP_BATCH_MAX_CHARS = 24_000
+_DEFAULT_RESOLVE_EDGE_PROMPT = prompt_library.dedupe_edges.resolve_edge
 
 
 def build_episodic_edges(
@@ -446,6 +453,239 @@ def preserved_attributes_kwargs(preserved: frozenset[str]) -> dict[str, Any]:
     return {'preserved_attributes': preserved} if preserved else {}
 
 
+def _find_verbatim_related_edge(
+    extracted_edge: EntityEdge, related_edges: list[EntityEdge]
+) -> EntityEdge | None:
+    """Return the first same-direction exact normalized-fact match in ``related_edges``."""
+    normalized_fact = _normalize_string_exact(extracted_edge.fact)
+    for edge in related_edges:
+        if (
+            edge.source_node_uuid == extracted_edge.source_node_uuid
+            and edge.target_node_uuid == extracted_edge.target_node_uuid
+            and _normalize_string_exact(edge.fact) == normalized_fact
+        ):
+            return edge
+    return None
+
+
+def _candidate_cannot_interact_temporally(
+    candidate: EntityEdge,
+    possible_resolved_edges: list[EntityEdge],
+) -> bool:
+    """True when ``candidate`` provably ended before every possible resolved edge started.
+
+    Deterministic temporal prefilter (Menhir #91 item 1.6): if ``candidate.invalid_at <= r.valid_at``
+    (and ``candidate.valid_at`` is absent or ``<= r.valid_at``) for every ``r`` in
+    ``[extracted_edge, *related_edges]``, then ``_contradiction_invalidates(candidate, r)`` is
+    guaranteed False and ``candidate`` cannot expire ``r`` via the newer-candidate check either.
+    Never applied to duplicate candidates (``related_edges``).
+    """
+    candidate_invalid_at = ensure_utc(candidate.invalid_at)
+    if candidate_invalid_at is None or not possible_resolved_edges:
+        return False
+    candidate_valid_at = ensure_utc(candidate.valid_at)
+    for resolved_candidate in possible_resolved_edges:
+        resolved_valid_at = ensure_utc(resolved_candidate.valid_at)
+        if resolved_valid_at is None:
+            return False
+        if candidate_invalid_at > resolved_valid_at:
+            return False
+        if candidate_valid_at is not None and candidate_valid_at > resolved_valid_at:
+            return False
+    return True
+
+
+def _prefilter_invalidation_candidates(
+    extracted_edge: EntityEdge,
+    related_edges: list[EntityEdge],
+    existing_edges: list[EntityEdge],
+) -> list[EntityEdge]:
+    """Drop invalidation candidates whose validity window provably ended before the new fact."""
+    if not existing_edges:
+        return existing_edges
+    possible_resolved = [extracted_edge, *related_edges]
+    if any(ensure_utc(edge.valid_at) is None for edge in possible_resolved):
+        return existing_edges
+    return [
+        candidate
+        for candidate in existing_edges
+        if not _candidate_cannot_interact_temporally(candidate, possible_resolved)
+    ]
+
+
+def _can_batch_edge_dedupe(clients: GraphitiClients | None) -> bool:
+    """True when batched edge deduplication will not bypass a custom single-edge route or override."""
+    if uses_prompt_routing(clients):
+        return False
+    if prompt_library.dedupe_edges.resolve_edge is not _DEFAULT_RESOLVE_EDGE_PROMPT:
+        return False
+    return _dedupe_extracted_edge is _ORIGINAL_DEDUPE_EXTRACTED_EDGE
+
+
+def _effective_batch_char_limit(llm_client: LLMClient, max_chars: int) -> int:
+    guard = getattr(llm_client, 'request_guard', None)
+    configured = getattr(guard, 'configured_ceiling', None)
+    if isinstance(configured, int) and configured > 0:
+        # Leave generous room for static system prompt (~1,100 tokens) and JSON output.
+        guard_budget_chars = max(2_000, int(configured * 2))
+        return min(max_chars, guard_budget_chars)
+    return max_chars
+
+
+def _build_edge_dedupe_request_payload(
+    request_id: int,
+    extracted_edge: EntityEdge,
+    related_edges: list[EntityEdge],
+    existing_edges: list[EntityEdge],
+) -> dict[str, Any]:
+    invalidation_idx_offset = len(related_edges)
+    return {
+        'request_id': request_id,
+        'existing_edges': [{'idx': i, 'fact': edge.fact} for i, edge in enumerate(related_edges)],
+        'edge_invalidation_candidates': [
+            {'idx': invalidation_idx_offset + i, 'fact': existing_edge.fact}
+            for i, existing_edge in enumerate(existing_edges)
+        ],
+        'new_edge': extracted_edge.fact,
+    }
+
+
+def _chunk_edge_dedupe_indices(
+    candidate_indices: list[int],
+    extracted_edges: list[EntityEdge],
+    related_edges_lists: list[list[EntityEdge]],
+    edge_invalidation_candidates: list[list[EntityEdge]],
+    *,
+    max_items: int,
+    max_chars: int,
+) -> tuple[list[list[int]], list[int]]:
+    """Pack semantic edge indices into bounded chunks of >=2 items; return (chunks, singles)."""
+    chunks: list[list[int]] = []
+    singles: list[int] = []
+    current: list[int] = []
+    current_chars = 0
+
+    for edge_idx in candidate_indices:
+        payload = _build_edge_dedupe_request_payload(
+            len(current),
+            extracted_edges[edge_idx],
+            related_edges_lists[edge_idx],
+            edge_invalidation_candidates[edge_idx],
+        )
+        item_chars = len(to_prompt_json(payload))
+        if item_chars > max_chars:
+            singles.append(edge_idx)
+            continue
+        if current and (len(current) >= max_items or current_chars + item_chars > max_chars):
+            if len(current) >= 2:
+                chunks.append(current)
+            else:
+                singles.extend(current)
+            current = [edge_idx]
+            current_chars = item_chars
+        else:
+            current.append(edge_idx)
+            current_chars += item_chars
+
+    if current:
+        if len(current) >= 2:
+            chunks.append(current)
+        else:
+            singles.extend(current)
+
+    return chunks, singles
+
+
+async def _resolve_edge_dedupe_batch_chunk(
+    llm_client: LLMClient,
+    chunk_indices: list[int],
+    extracted_edges: list[EntityEdge],
+    related_edges_lists: list[list[EntityEdge]],
+    edge_invalidation_candidates: list[list[EntityEdge]],
+    *,
+    clients: GraphitiClients | None = None,
+) -> dict[int, EdgeDuplicate] | None:
+    """Resolve one bounded chunk of edge dedupe requests in a single LLM call.
+
+    Returns ``{edge_index: EdgeDuplicate}`` when every request_id 0..len-1 is accounted for
+    exactly once; returns ``None`` on malformed/incomplete output so the caller can fall back
+    to per-edge resolution for only this chunk.
+    """
+    requests = [
+        _build_edge_dedupe_request_payload(
+            req_id,
+            extracted_edges[edge_idx],
+            related_edges_lists[edge_idx],
+            edge_invalidation_candidates[edge_idx],
+        )
+        for req_id, edge_idx in enumerate(chunk_indices)
+    ]
+    try:
+        llm_response = await generate_prompt_response(
+            llm_client,
+            'dedupe_edges.resolve_edges_batch',
+            prompt_library.dedupe_edges.resolve_edges_batch,
+            {'edge_requests': requests},
+            clients=clients,
+            response_model=EdgeDuplicateBatch,
+            model_size=ModelSize.small,
+        )
+    except RateLimitError:
+        raise
+    except Exception:
+        logger.warning(
+            'Batched edge deduplication failed for chunk of %d edges; falling back to per-edge resolution',
+            len(chunk_indices),
+            exc_info=True,
+        )
+        return None
+
+    if not isinstance(llm_response, dict) or not isinstance(
+        llm_response.get('edge_resolutions'), list
+    ):
+        logger.warning(
+            'Batched edge deduplication returned unexpected payload without edge_resolutions; '
+            'falling back to per-edge resolution'
+        )
+        return None
+
+    try:
+        batch = EdgeDuplicateBatch(**llm_response)
+    except Exception:
+        logger.warning(
+            'Batched edge deduplication response failed validation; falling back to per-edge resolution',
+            exc_info=True,
+        )
+        return None
+
+    expected_ids = set(range(len(chunk_indices)))
+    by_req_id: dict[int, EdgeDuplicate] = {}
+    for item in batch.edge_resolutions:
+        if item.request_id not in expected_ids or item.request_id in by_req_id:
+            logger.warning(
+                'Batched edge deduplication returned invalid or duplicate request_id=%s '
+                '(expected 0..%d); falling back to per-edge resolution',
+                item.request_id,
+                len(chunk_indices) - 1,
+            )
+            return None
+        by_req_id[item.request_id] = EdgeDuplicate(
+            duplicate_facts=item.duplicate_facts,
+            contradicted_facts=item.contradicted_facts,
+        )
+
+    if len(by_req_id) != len(chunk_indices):
+        logger.warning(
+            'Batched edge deduplication returned %d resolutions for %d requests; '
+            'falling back to per-edge resolution',
+            len(by_req_id),
+            len(chunk_indices),
+        )
+        return None
+
+    return {edge_idx: by_req_id[req_id] for req_id, edge_idx in enumerate(chunk_indices)}
+
+
 async def resolve_extracted_edges(
     clients: GraphitiClients,
     extracted_edges: list[EntityEdge],
@@ -460,6 +700,7 @@ async def resolve_extracted_edges(
     edge_invalidation_hook: EdgeInvalidationHook | None = None,
     preserved_attributes: frozenset[str] = frozenset(),
     trace: 'ResolutionTrace | None' = None,
+    batch_edge_dedupe: bool = True,
 ) -> tuple[list[EntityEdge], list[EntityEdge], list[EntityEdge]]:
     """Resolve extracted edges against existing graph context.
 
@@ -541,37 +782,81 @@ async def resolve_extracted_edges(
     extracted_edges = deduplicated_edges
     edge_types_lst = deduplicated_edge_types
 
-    await create_entity_edge_embeddings(embedder, extracted_edges)
+    # Fast path (item 1.7): if an override edge already matches (src, tgt, normalized_fact, group),
+    # skip both hybrid search fan-outs for that edge.
+    override_by_pair: dict[tuple[str, str], list[EntityEdge]] = {}
+    if existing_edges_override:
+        for edge in existing_edges_override:
+            pair = (edge.source_node_uuid, edge.target_node_uuid)
+            override_by_pair.setdefault(pair, []).append(edge)
+
+    override_exact_matches: dict[int, EntityEdge] = {}
+    if override_by_pair:
+        for i, extracted_edge in enumerate(extracted_edges):
+            pair = (extracted_edge.source_node_uuid, extracted_edge.target_node_uuid)
+            same_group_overrides = [
+                edge
+                for edge in override_by_pair.get(pair, [])
+                if edge.group_id == extracted_edge.group_id
+            ]
+            exact_hit = _find_verbatim_related_edge(extracted_edge, same_group_overrides)
+            if exact_hit is not None:
+                override_exact_matches[i] = exact_hit
+
+    edges_needing_pair_search = [
+        i for i in range(len(extracted_edges)) if i not in override_exact_matches
+    ]
+    if edges_needing_pair_search:
+        await create_entity_edge_embeddings(
+            embedder, [extracted_edges[i] for i in edges_needing_pair_search]
+        )
 
     # Duplicate candidates have the same endpoints in either direction.
     # Prefiltering the search by endpoints limits the search work. The post-filter
     # removes self-loops and protects against indexes that return unrelated edges.
     # Reuse each computed fact embedding to avoid another embedder request.
-    related_edges_results: list[SearchResults] = await semaphore_gather(
-        *[
-            search(
-                clients,
-                extracted_edge.fact,
-                group_ids=[extracted_edge.group_id],
-                config=EDGE_HYBRID_SEARCH_RRF,
-                search_filter=_pair_search_filter(extracted_edge),
-                query_vector=extracted_edge.fact_embedding,
+    pair_search_results: list[SearchResults] = (
+        list(
+            await semaphore_gather(
+                *[
+                    search(
+                        clients,
+                        extracted_edges[i].fact,
+                        group_ids=[extracted_edges[i].group_id],
+                        config=EDGE_HYBRID_SEARCH_RRF,
+                        search_filter=_pair_search_filter(extracted_edges[i]),
+                        query_vector=extracted_edges[i].fact_embedding,
+                    )
+                    for i in edges_needing_pair_search
+                ],
+                max_coroutines=getattr(clients, 'max_coroutines', None),
             )
-            for extracted_edge in extracted_edges
-        ],
-        max_coroutines=getattr(clients, 'max_coroutines', None),
+        )
+        if edges_needing_pair_search
+        else []
     )
-    related_edges_lists: list[list[EntityEdge]] = [
-        [candidate for candidate in _same_pair_edges(extracted_edge, result.edges)]
-        for extracted_edge, result in zip(extracted_edges, related_edges_results, strict=True)
-    ]
-    if existing_edges_override:
-        override_by_pair: dict[tuple[str, str], list[EntityEdge]] = {}
-        for edge in existing_edges_override:
-            pair = (edge.source_node_uuid, edge.target_node_uuid)
-            override_by_pair.setdefault(pair, []).append(edge)
+    pair_results_by_idx = dict(zip(edges_needing_pair_search, pair_search_results, strict=True))
 
-        for extracted_edge, related_edges in zip(extracted_edges, related_edges_lists, strict=True):
+    related_edges_lists: list[list[EntityEdge]] = []
+    for i, extracted_edge in enumerate(extracted_edges):
+        if i in override_exact_matches:
+            related_edges_lists.append([override_exact_matches[i]])
+        else:
+            related_edges_lists.append(
+                [
+                    candidate
+                    for candidate in _same_pair_edges(
+                        extracted_edge, pair_results_by_idx[i].edges
+                    )
+                ]
+            )
+
+    if override_by_pair:
+        for i, (extracted_edge, related_edges) in enumerate(
+            zip(extracted_edges, related_edges_lists, strict=True)
+        ):
+            if i in override_exact_matches:
+                continue
             pair = (extracted_edge.source_node_uuid, extracted_edge.target_node_uuid)
             existing_uuids = {edge.uuid for edge in related_edges}
             for edge in override_by_pair.get(pair, []):
@@ -579,34 +864,62 @@ async def resolve_extracted_edges(
                     related_edges.append(edge)
                     existing_uuids.add(edge.uuid)
 
-    edge_invalidation_candidate_results: list[SearchResults] = await semaphore_gather(
-        *[
-            search(
-                clients,
-                extracted_edge.fact,
-                group_ids=[extracted_edge.group_id],
-                config=EDGE_HYBRID_SEARCH_RRF,
-                search_filter=SearchFilters(),
-                query_vector=extracted_edge.fact_embedding,
+    # Item 1.7: edges that already match a stored edge verbatim in related_edges take the
+    # exact-fact fast path in _dedupe_extracted_edge and never consume invalidation candidates,
+    # so skip the unfiltered global hybrid search fan-out for them.
+    verbatim_match_indices = {
+        i
+        for i, (extracted_edge, related_edges) in enumerate(
+            zip(extracted_edges, related_edges_lists, strict=True)
+        )
+        if _find_verbatim_related_edge(extracted_edge, related_edges) is not None
+    }
+    edges_needing_invalidation_search = [
+        i for i in range(len(extracted_edges)) if i not in verbatim_match_indices
+    ]
+
+    invalidation_search_results: list[SearchResults] = (
+        list(
+            await semaphore_gather(
+                *[
+                    search(
+                        clients,
+                        extracted_edges[i].fact,
+                        group_ids=[extracted_edges[i].group_id],
+                        config=EDGE_HYBRID_SEARCH_RRF,
+                        search_filter=SearchFilters(),
+                        query_vector=extracted_edges[i].fact_embedding,
+                    )
+                    for i in edges_needing_invalidation_search
+                ],
+                max_coroutines=getattr(clients, 'max_coroutines', None),
             )
-            for extracted_edge in extracted_edges
-        ],
-        max_coroutines=getattr(clients, 'max_coroutines', None),
+        )
+        if edges_needing_invalidation_search
+        else []
+    )
+    invalidation_results_by_idx = dict(
+        zip(edges_needing_invalidation_search, invalidation_search_results, strict=True)
     )
 
     resolver_kwargs = {'clients': clients} if uses_prompt_routing(clients) else {}
     edge_invalidation_candidates: list[list[EntityEdge]] = []
-    for _extracted_edge, related_edges, invalidation_result in zip(
-        extracted_edges,
-        related_edges_lists,
-        edge_invalidation_candidate_results,
-        strict=True,
+    for i, (extracted_edge, related_edges) in enumerate(
+        zip(extracted_edges, related_edges_lists, strict=True)
     ):
+        invalidation_result = invalidation_results_by_idx.get(i)
+        if invalidation_result is None:
+            edge_invalidation_candidates.append([])
+            continue
         related_uuids = {edge.uuid for edge in related_edges}
         deduplicated = [
             edge for edge in invalidation_result.edges if edge.uuid not in related_uuids
         ]
-        edge_invalidation_candidates.append(deduplicated)
+        # Item 1.6: drop invalidation candidates provably ended before the new edge starts.
+        filtered = _prefilter_invalidation_candidates(
+            extracted_edge, related_edges, deduplicated
+        )
+        edge_invalidation_candidates.append(filtered)
 
     logger.debug(
         f'Related edges: {[e.uuid for edges_lst in related_edges_lists for e in edges_lst]}'
@@ -638,6 +951,46 @@ async def resolve_extracted_edges(
             )
         trace.watch_stored_edges(watched_edges)
 
+    # Phase 3 (Menhir #91 Path B): batch semantic edge dedupe judgments into bounded multi-edge
+    # calls, then feed validated decisions through the existing deterministic per-edge application.
+    precomputed_decisions: dict[int, EdgeDuplicate] = {}
+    if batch_edge_dedupe and _can_batch_edge_dedupe(clients):
+        semantic_indices = [
+            i
+            for i, (related_edges, existing_edges) in enumerate(
+                zip(related_edges_lists, edge_invalidation_candidates, strict=True)
+            )
+            if i not in verbatim_match_indices and (related_edges or existing_edges)
+        ]
+        if len(semantic_indices) >= 2:
+            char_limit = _effective_batch_char_limit(llm_client, EDGE_DEDUP_BATCH_MAX_CHARS)
+            chunks, _singles = _chunk_edge_dedupe_indices(
+                semantic_indices,
+                extracted_edges,
+                related_edges_lists,
+                edge_invalidation_candidates,
+                max_items=EDGE_DEDUP_BATCH_MAX_ITEMS,
+                max_chars=char_limit,
+            )
+            if chunks:
+                chunk_results = await semaphore_gather(
+                    *[
+                        _resolve_edge_dedupe_batch_chunk(
+                            llm_client,
+                            chunk,
+                            extracted_edges,
+                            related_edges_lists,
+                            edge_invalidation_candidates,
+                            **resolver_kwargs,
+                        )
+                        for chunk in chunks
+                    ],
+                    max_coroutines=getattr(clients, 'max_coroutines', None),
+                )
+                for result_map in chunk_results:
+                    if result_map is not None:
+                        precomputed_decisions.update(result_map)
+
     dedupe_results: list[tuple[EntityEdge, list[EntityEdge], list[EntityEdge] | None]] = list(
         await semaphore_gather(
             *[
@@ -650,13 +1003,20 @@ async def resolve_extracted_edges(
                     extracted_edge_types,
                     **resolver_kwargs,
                     **preserved_attributes_kwargs(preserved_attributes),
+                    **(
+                        {'precomputed_decision': precomputed_decisions[i]}
+                        if i in precomputed_decisions
+                        else {}
+                    ),
                 )
-                for extracted_edge, related_edges, existing_edges, extracted_edge_types in zip(
-                    extracted_edges,
-                    related_edges_lists,
-                    edge_invalidation_candidates,
-                    edge_types_lst,
-                    strict=True,
+                for i, (extracted_edge, related_edges, existing_edges, extracted_edge_types) in enumerate(
+                    zip(
+                        extracted_edges,
+                        related_edges_lists,
+                        edge_invalidation_candidates,
+                        edge_types_lst,
+                        strict=True,
+                    )
                 )
             ],
             max_coroutines=getattr(clients, 'max_coroutines', None),
@@ -1199,12 +1559,16 @@ async def decide_edge_against_candidates(
     existing_edges: list[EntityEdge],
     *,
     clients: GraphitiClients | None = None,
+    precomputed_decision: EdgeDuplicate | None = None,
 ) -> EdgeDecision:
     """Decide if an edge is a duplicate of a candidate and which candidates it contradicts.
 
     `related_edges` are the duplicate candidates. `existing_edges` are the invalidation
     candidates. The function extracts no attributes and no timestamps, and it changes
     no edge.
+
+    A `precomputed_decision` (Archolith fork, menhir#91 batch edge dedupe) replaces the
+    model call; the exact-match fast path and index validation still apply.
     """
     # Fast path: if the fact text and endpoints already exist verbatim, reuse the matching edge.
     normalized_fact = _normalize_string_exact(extracted_edge.fact)
@@ -1218,43 +1582,47 @@ async def decide_edge_against_candidates(
 
     start = time()
 
-    # Prepare context for LLM with continuous indexing
-    related_edges_context = [{'idx': i, 'fact': edge.fact} for i, edge in enumerate(related_edges)]
-
-    # Invalidation candidates start where duplicate candidates end
     invalidation_idx_offset = len(related_edges)
-    invalidation_edge_candidates_context = [
-        {'idx': invalidation_idx_offset + i, 'fact': existing_edge.fact}
-        for i, existing_edge in enumerate(existing_edges)
-    ]
 
-    context = {
-        'existing_edges': related_edges_context,
-        'new_edge': extracted_edge.fact,
-        'edge_invalidation_candidates': invalidation_edge_candidates_context,
-    }
+    if precomputed_decision is not None:
+        response_object = precomputed_decision
+    else:
+        # Prepare context for LLM with continuous indexing
+        related_edges_context = [{'idx': i, 'fact': edge.fact} for i, edge in enumerate(related_edges)]
 
-    if related_edges or existing_edges:
-        logger.debug(
-            'Resolving edge: sent %d EXISTING FACTS%s and %d INVALIDATION CANDIDATES%s',
-            len(related_edges),
-            f' (idx 0-{len(related_edges) - 1})' if related_edges else '',
-            len(existing_edges),
-            f' (idx {invalidation_idx_offset}-{invalidation_idx_offset + len(existing_edges) - 1})'
-            if existing_edges
-            else '',
+        # Invalidation candidates start where duplicate candidates end
+        invalidation_edge_candidates_context = [
+            {'idx': invalidation_idx_offset + i, 'fact': existing_edge.fact}
+            for i, existing_edge in enumerate(existing_edges)
+        ]
+
+        context = {
+            'existing_edges': related_edges_context,
+            'new_edge': extracted_edge.fact,
+            'edge_invalidation_candidates': invalidation_edge_candidates_context,
+        }
+
+        if related_edges or existing_edges:
+            logger.debug(
+                'Resolving edge: sent %d EXISTING FACTS%s and %d INVALIDATION CANDIDATES%s',
+                len(related_edges),
+                f' (idx 0-{len(related_edges) - 1})' if related_edges else '',
+                len(existing_edges),
+                f' (idx {invalidation_idx_offset}-{invalidation_idx_offset + len(existing_edges) - 1})'
+                if existing_edges
+                else '',
+            )
+
+        llm_response = await generate_prompt_response(
+            llm_client,
+            'dedupe_edges.resolve_edge',
+            prompt_library.dedupe_edges.resolve_edge,
+            context,
+            clients=clients,
+            response_model=EdgeDuplicate,
+            model_size=ModelSize.small,
         )
-
-    llm_response = await generate_prompt_response(
-        llm_client,
-        'dedupe_edges.resolve_edge',
-        prompt_library.dedupe_edges.resolve_edge,
-        context,
-        clients=clients,
-        response_model=EdgeDuplicate,
-        model_size=ModelSize.small,
-    )
-    response_object = EdgeDuplicate(**llm_response)
+        response_object = EdgeDuplicate(**llm_response)
     duplicate_facts = response_object.duplicate_facts
 
     # Validate duplicate_facts are in valid range for EXISTING FACTS
@@ -1309,6 +1677,7 @@ async def _dedupe_extracted_edge(
     preserved_attributes: frozenset[str] = frozenset(),
     *,
     clients: GraphitiClients | None = None,
+    precomputed_decision: EdgeDuplicate | None = None,
 ) -> tuple[EntityEdge, list[EntityEdge], list[EntityEdge] | None]:
     """Deduplicate an extracted edge and gather the edges it might contradict.
 
@@ -1352,6 +1721,11 @@ async def _dedupe_extracted_edge(
                 resolved_edge.episodes.append(episode_uuid)
         _apply_update_to_own_copy(resolved_edge, extracted_edge)
 
+    if precomputed_decision is None:
+        existing_edges = _prefilter_invalidation_candidates(
+            extracted_edge, related_edges, existing_edges
+        )
+
     # Nothing to compare against, so there is no duplicate and nothing to contradict.
     if len(related_edges) == 0 and len(existing_edges) == 0:
         # Still extract custom attributes and timestamps even when no dedup needed
@@ -1389,7 +1763,12 @@ async def _dedupe_extracted_edge(
         return extracted_edge, [], None
 
     decision = await decide_edge_against_candidates(
-        llm_client, extracted_edge, related_edges, existing_edges, clients=clients
+        llm_client,
+        extracted_edge,
+        related_edges,
+        existing_edges,
+        clients=clients,
+        precomputed_decision=precomputed_decision,
     )
 
     # Fast path: the fact text and endpoints already exist verbatim, so reuse the matching edge.
@@ -1496,6 +1875,9 @@ async def _dedupe_extracted_edge(
     )
 
     return resolved_edge, decision.duplicates, invalidation_candidates
+
+
+_ORIGINAL_DEDUPE_EXTRACTED_EDGE = _dedupe_extracted_edge
 
 
 async def filter_existing_duplicate_of_edges(

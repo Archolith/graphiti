@@ -27,6 +27,7 @@ from .dedupe_edges import (
     DedupeEdgesPrompts,
     DefaultDedupeEdgesPrompts,
     EdgeDuplicate,
+    EdgeDuplicateBatch,
 )
 from .dedupe_edges import (
     Prompt as DedupeEdgesPrompt,
@@ -166,7 +167,7 @@ PROMPT_GROUPS: dict[str, tuple[str, ...]] = {
         'extract_timestamps_batch',
     ),
     'extract_nodes_and_edges': ('extract_message',),
-    'dedupe_edges': ('resolve_edge',),
+    'dedupe_edges': ('resolve_edge', 'resolve_edges_batch'),
     'summarize_nodes': ('summarize_pair', 'summarize_context', 'summary_description'),
     'summarize_sagas': ('summarize_saga',),
     'eval': (
@@ -300,6 +301,10 @@ def _builtin_specs() -> dict[str, PromptSpec]:
         'dedupe_edges.resolve_edge': PromptSpec(
             name='dedupe_edges.resolve_edge',
             response_model=EdgeDuplicate,
+        ),
+        'dedupe_edges.resolve_edges_batch': PromptSpec(
+            name='dedupe_edges.resolve_edges_batch',
+            response_model=EdgeDuplicateBatch,
         ),
         'summarize_nodes.summarize_pair': PromptSpec(
             name='summarize_nodes.summarize_pair',

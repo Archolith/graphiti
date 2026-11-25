@@ -63,6 +63,7 @@ class LLMPromptOverrides:
     @dataclass(frozen=True)
     class DedupeEdges:
         resolve_edge: ChatPromptFunction | None = None
+        resolve_edges_batch: ChatPromptFunction | None = None
 
     @dataclass(frozen=True)
     class SummarizeNodes:
@@ -249,6 +250,7 @@ class PromptRoutes:
     class DedupeEdges:
         default: LLMModel | None = None
         resolve_edge: LLMModel | None = None
+        resolve_edges_batch: LLMModel | None = None
 
     @dataclass(frozen=True)
     class SummarizeNodes:
