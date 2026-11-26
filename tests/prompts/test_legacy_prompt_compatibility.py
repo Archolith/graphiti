@@ -25,6 +25,14 @@ PROMPT_CONTEXT: dict[str, Any] = {
     'candidate': 'Alice knows Bob.',
     'custom_extraction_instructions': 'Use only facts stated in the episode.',
     'edge_invalidation_candidates': '[]',
+    'edge_requests': [
+        {
+            'request_id': 0,
+            'existing_edges': [{'idx': 0, 'fact': 'Alice knows Bob.'}],
+            'edge_invalidation_candidates': [],
+            'new_edge': 'Alice knows Bob.',
+        }
+    ],
     'edge_types': [{'name': 'KNOWS', 'description': 'One person knows another.'}],
     'entities': [{'name': 'Alice', 'type': 'Person'}],
     'entity_summaries': [{'name': 'Alice', 'summary': 'Project lead.'}],

@@ -262,7 +262,7 @@ async def test_same_pair_duplicate_fast_path_one_search():
     report = await run_scenario(SCENARIOS['same_pair_duplicate'])
     assert report['resolved_uuid'] == 'E2'
     assert report['llm_called'] is False, 'exact match resolves without an LLM call'
-    assert report['searches'] == ['pair-filtered', 'graph-wide']
+    assert report['searches'] == ['pair-filtered']
 
 
 async def test_reverse_direction_duplicate_is_caught():

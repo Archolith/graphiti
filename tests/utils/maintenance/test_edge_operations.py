@@ -1697,14 +1697,12 @@ async def test_resolve_extracted_edges_pair_scopes_duplicate_search(monkeypatch)
         edge_type_map={},
     )
 
-    # Exactly two searches: the pair-scoped duplicate search, then the
-    # graph-wide invalidation search.
-    assert len(captured_filters) == 2
-    pair_filter, invalidation_filter = captured_filters
+    # Pair-scoped duplicate search finds the verbatim match, so the graph-wide
+    # invalidation search is skipped on the exact-fact fast path (menhir#91 item 1.7).
+    assert len(captured_filters) == 1
+    pair_filter = captured_filters[0]
     assert pair_filter.edge_source_node_uuids == ['source_uuid', 'target_uuid']
     assert pair_filter.edge_target_node_uuids == ['source_uuid', 'target_uuid']
-    assert invalidation_filter.edge_source_node_uuids is None
-    assert invalidation_filter.edge_uuids is None
     # The pair edge resolved via the exact-fact fast path.
     assert resolved_edges[0].uuid == existing.uuid
     assert invalidated_edges == []
