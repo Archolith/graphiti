@@ -10,12 +10,19 @@ import pytest
 
 from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.neo4j.operations.search_ops import _build_neo4j_fulltext_query
-from graphiti_core.driver.relate.operations.search_ops import _build_relate_fulltext_query
 from graphiti_core.search import search as search_module
 from graphiti_core.search.search_config import SearchResults
 from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.search.search_utils import fulltext_query
+
+
+def _relate_builder():
+    # The Relate driver needs the optional `relate` package.
+    pytest.importorskip('relate')
+    from graphiti_core.driver.relate.operations.search_ops import _build_relate_fulltext_query
+
+    return _build_relate_fulltext_query
 
 
 def _driver():
@@ -59,7 +66,7 @@ async def test_search_keeps_default_group_scope(group_ids, expected):
     [
         lambda q, g: fulltext_query(q, g, _driver()),
         lambda q, g: _build_neo4j_fulltext_query(q, g),
-        lambda q, g: _build_relate_fulltext_query(q, g),
+        lambda q, g: _relate_builder()(q, g),
     ],
 )
 def test_lucene_group_clause_omitted_when_default_group_present(build):
