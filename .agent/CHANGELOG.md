@@ -1,5 +1,19 @@
 # Changelog — graphiti
 
+## 2026-11-26 — Default-group searches stay in the default group
+
+- `search/search.py`: `group_ids=['']` is the default group, not "every group". Upstream turned it
+  into `None`, so the duplicate and invalidation candidate searches for a default-group edge (Menhir's
+  default namespace) returned other groups' edges, and a default-group episode could expire them. An
+  empty list still means no group filter.
+- `search/search_utils.py`, `driver/neo4j/operations/search_ops.py`,
+  `driver/relate/operations/search_ops.py`: Lucene drops an empty `group_id:""` clause, so a group
+  list holding `''` gets no Lucene group clause; the Cypher `group_id IN $group_ids` filter scopes it.
+  Before, `['', 'x']` narrowed to `x` alone.
+- Not changed: FalkorDB (one graph per group). Edges with a null `group_id` match no group list.
+- Tests: `tests/utils/search/test_default_group_scope.py`; `tests/test_default_group_search_scope_int.py`
+  (disposable Neo4j) fails before the fix. The unit test joins the compatibility workflow.
+
 ## 2026-11-25 — Review fixes for batched edge deduplication (menhir#91 Path B)
 
 - `edge_operations.py`:
