@@ -58,7 +58,12 @@ def _build_neo4j_fulltext_query(
 ) -> str:
     validate_group_ids(group_ids)
 
-    group_ids_filter_list = [f'group_id:"{g}"' for g in group_ids] if group_ids is not None else []
+    # Lucene drops an empty group_id:"" clause; the Cypher group filter scopes the default group.
+    group_ids_filter_list = (
+        [f'group_id:"{g}"' for g in group_ids]
+        if group_ids is not None and '' not in group_ids
+        else []
+    )
     group_ids_filter = ''
     for f in group_ids_filter_list:
         group_ids_filter += f if not group_ids_filter else f' OR {f}'

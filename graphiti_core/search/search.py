@@ -152,8 +152,9 @@ async def search(
     else:
         search_vector = [0.0] * EMBEDDING_DIM
 
-    # if group_ids is empty, set it to None
-    group_ids = group_ids if group_ids and group_ids != [''] else None
+    # An empty list means no group filter. [''] is the default group, a real scope (fork: upstream
+    # widened it to every group, so default-group dedupe and invalidation saw other groups' edges).
+    group_ids = group_ids if group_ids else None
     with _trace_phase(
         search_tracer,
         'search.execute_scopes',
