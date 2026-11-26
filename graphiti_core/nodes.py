@@ -658,7 +658,7 @@ class EntityNode(Node):
                 pass
 
         unique_names = sorted({name for name in names if name})
-        unique_group_ids = sorted({group_id for group_id in group_ids if group_id})
+        unique_group_ids = sorted({group_id for group_id in group_ids if group_id is not None})
         if not unique_names or not unique_group_ids:
             return []
 
